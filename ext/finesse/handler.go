@@ -15,6 +15,11 @@ import (
 )
 
 func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterRegistry, shutdown context.Context, cfg Config) {
+	// Set CORS headers early so error responses are readable by the browser.
+	if origin := matchOrigin(r.Header.Get("Origin"), cfg.AllowOrigins); origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+	}
+
 	token := r.URL.Query().Get("signed_stream")
 	if token == "" {
 		http.Error(w, "signed_stream parameter required", http.StatusBadRequest)
@@ -38,9 +43,6 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
-	if origin := matchOrigin(r.Header.Get("Origin"), cfg.AllowOrigins); origin != "" {
-		h.Set("Access-Control-Allow-Origin", origin)
-	}
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 

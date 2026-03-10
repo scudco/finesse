@@ -36,6 +36,9 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/up", func(w http.ResponseWriter, r *http.Request) {
+		if origin := matchOrigin(r.Header.Get("Origin"), cfg.AllowOrigins); origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
