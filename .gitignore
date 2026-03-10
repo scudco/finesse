@@ -1,0 +1,14 @@
+*.gem
+pkg/
+tmp/
+doc/
+.bundle/
+vendor/bundle/
+Gemfile.lock
+README.html
+
+# Compiled Go binaries (built via rake build:local or rake build:all)
+exe/arm64-darwin/
+exe/x86_64-darwin/
+exe/aarch64-linux/
+exe/x86_64-linux/
