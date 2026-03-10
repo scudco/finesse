@@ -188,6 +188,9 @@ servers:
     hosts:
       - <your-public-server-ip>
     cmd: bundle exec finesse --allow-origin "https://yourapp.com"
+    env:
+      clear:
+        BINDING: 0.0.0.0
     proxy:
       ssl: true
       host: sse.yourapp.com
