@@ -73,7 +73,6 @@ namespace :build do
   end
 end
 
-desc "Run tests, build all binaries, and package the gem"
-task release_build: ["test", "build:all"] do
-  sh "gem build finesse.gemspec"
-end
+# Ensure Go binaries are compiled before gem packaging.
+# `build` and `release` come from bundler/gem_tasks.
+task build: "build:all"

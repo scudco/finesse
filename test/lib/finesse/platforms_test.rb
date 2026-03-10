@@ -7,25 +7,27 @@ require "fileutils"
 class TestPlatforms < Minitest::Test
   def test_platform_returns_known_platform
     platform = Finesse::Platforms.platform
-    assert_includes Finesse::Platforms::PLATFORMS.keys, platform
+    assert_includes Finesse::Platforms::SUPPORTED_PLATFORMS, platform
   end
 
   def test_executable_raises_when_binary_missing
-    with_executable_stub("/nonexistent/path/finesse") do
-      assert_raises(Finesse::Platforms::UnsupportedPlatformError) do
-        Finesse::Platforms.executable
+    Dir.mktmpdir do |dir|
+      with_root(dir) do
+        assert_raises(Finesse::Platforms::UnsupportedPlatformError) do
+          Finesse::Platforms.executable
+        end
       end
     end
   end
 
   def test_executable_returns_path_when_binary_exists
     Dir.mktmpdir do |dir|
-      bin_path = File.join(dir, "exe", Finesse::Platforms.platform, "finesse")
-      FileUtils.mkdir_p(File.dirname(bin_path))
-      File.write(bin_path, "")
+      expected = File.join(dir, "exe", Finesse::Platforms.platform, "finesse")
+      FileUtils.mkdir_p(File.dirname(expected))
+      File.write(expected, "")
 
-      with_executable_stub(bin_path) do
-        assert_equal bin_path, Finesse::Platforms.executable
+      with_root(dir) do
+        assert_equal expected, Finesse::Platforms.executable
       end
     end
   end
@@ -79,17 +81,12 @@ class TestPlatforms < Minitest::Test
 
   private
 
-  def with_executable_stub(path)
-    original = Finesse::Platforms.method(:executable)
-    quietly do
-      Finesse::Platforms.define_singleton_method(:executable) do
-        raise Finesse::Platforms::UnsupportedPlatformError, "not found at #{path}" unless File.exist?(path)
-        path
-      end
-    end
+  def with_root(dir)
+    original = Finesse::Platforms.method(:root)
+    quietly { Finesse::Platforms.define_singleton_method(:root) { dir } }
     yield
   ensure
-    quietly { Finesse::Platforms.define_singleton_method(:executable, original) }
+    quietly { Finesse::Platforms.define_singleton_method(:root, original) }
   end
 
   def quietly

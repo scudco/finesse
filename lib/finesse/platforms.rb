@@ -1,16 +1,20 @@
 module Finesse
   module Platforms
-    # Maps Ruby platform identifiers to Go binary subdirectories.
-    PLATFORMS = {
-      "arm64-darwin"   => "arm64-darwin",
-      "x86_64-darwin"  => "x86_64-darwin",
-      "aarch64-linux"  => "aarch64-linux",
-      "x86_64-linux"   => "x86_64-linux",
-    }.freeze
+    SUPPORTED_PLATFORMS = %w[
+      arm64-darwin
+      x86_64-darwin
+      aarch64-linux
+      x86_64-linux
+    ].freeze
 
     class UnsupportedPlatformError < StandardError; end
 
     class << self
+      # Root directory of the gem (two levels up from lib/finesse/).
+      def root
+        File.expand_path("../..", __dir__)
+      end
+
       def platform
         cpu = Gem::Platform.local.cpu
         os = Gem::Platform.local.os
@@ -27,15 +31,12 @@ module Finesse
         else
           raise UnsupportedPlatformError,
             "Finesse does not support #{cpu}-#{os}. " \
-            "Supported platforms: #{PLATFORMS.keys.join(", ")}"
+            "Supported platforms: #{SUPPORTED_PLATFORMS.join(", ")}"
         end
       end
 
       def executable
-        exe = File.expand_path(
-          File.join("..", "..", "exe", platform, "finesse"),
-          __dir__
-        )
+        exe = File.join(root, "exe", platform, "finesse")
 
         unless File.exist?(exe)
           raise UnsupportedPlatformError,
