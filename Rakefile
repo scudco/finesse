@@ -51,16 +51,3 @@ namespace :build do
     end
   end
 end
-
-namespace :gem do
-  desc "Build platform-specific gem files"
-  task :native do
-    Rake::Task["build:all"].invoke
-
-    PLATFORMS.each_key do |platform|
-      puts "Building gem for #{platform}..."
-      # Platform gems include only their binary
-      sh "gem build finesse.gemspec"
-    end
-  end
-end

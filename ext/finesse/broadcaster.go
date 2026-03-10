@@ -23,7 +23,7 @@ type broadcaster struct {
 	tableName string
 	stopCh    chan struct{}
 
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	clients  map[chan []message]struct{}
 	buffer   []message // ring of last bufferSize messages
 	latestID int64
@@ -45,13 +45,13 @@ func newBroadcaster(db *sql.DB, channel string, cfg Config) *broadcaster {
 }
 
 func (b *broadcaster) run(cfg Config) {
-	ticker := newTicker(cfg.PollInterval)
+	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-b.stopCh:
 			return
-		case <-ticker.C():
+		case <-ticker.C:
 			b.poll()
 		}
 	}
@@ -171,21 +171,4 @@ func (r *broadcasterRegistry) stopAll() {
 	for _, b := range r.broadcasters {
 		b.stop()
 	}
-}
-
-// ticker wraps time.Ticker so we can use a consistent interface.
-type ticker struct {
-	t *time.Ticker
-}
-
-func newTicker(d time.Duration) *ticker {
-	return &ticker{t: time.NewTicker(d)}
-}
-
-func (t *ticker) C() <-chan time.Time {
-	return t.t.C
-}
-
-func (t *ticker) Stop() {
-	t.t.Stop()
 }

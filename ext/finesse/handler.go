@@ -38,7 +38,9 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 	h.Set("Cache-Control", "no-cache")
 	h.Set("Connection", "keep-alive")
 	h.Set("X-Accel-Buffering", "no")
-	h.Set("Access-Control-Allow-Origin", cfg.AllowOrigin)
+	if origin := matchOrigin(r.Header.Get("Origin"), cfg.AllowOrigins); origin != "" {
+		h.Set("Access-Control-Allow-Origin", origin)
+	}
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
@@ -79,6 +81,16 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 			flusher.Flush()
 		}
 	}
+}
+
+// matchOrigin returns the origin if it matches the allowlist, or "" if not.
+func matchOrigin(origin string, allowed []string) string {
+	for _, a := range allowed {
+		if a == "*" || a == origin {
+			return a
+		}
+	}
+	return ""
 }
 
 // verifySignedStream verifies a signed stream token in ActiveSupport::MessageVerifier

@@ -5,8 +5,18 @@ import (
 	"flag"
 	"log"
 	"os"
+	"strings"
 	"time"
 )
+
+// stringSlice implements flag.Value for repeated string flags.
+type stringSlice []string
+
+func (s *stringSlice) String() string { return strings.Join(*s, ", ") }
+func (s *stringSlice) Set(v string) error {
+	*s = append(*s, v)
+	return nil
+}
 
 // Config holds all runtime configuration parsed from CLI flags.
 type Config struct {
@@ -15,7 +25,7 @@ type Config struct {
 	DBPath       string
 	TableName    string
 	PollInterval time.Duration
-	AllowOrigin  string
+	AllowOrigins []string
 	SigningKey    []byte
 }
 
@@ -27,8 +37,10 @@ func ParseConfig() Config {
 	flag.StringVar(&cfg.DBPath, "db-path", "storage/development_cable.sqlite3", "path to SolidCable SQLite database")
 	flag.StringVar(&cfg.TableName, "table-name", "solid_cable_messages", "SolidCable messages table name")
 	flag.IntVar(&pollMS, "poll-interval", 10, "database poll interval in milliseconds")
-	flag.StringVar(&cfg.AllowOrigin, "allow-origin", "", "Access-Control-Allow-Origin header value (required)")
+	var allowOrigins stringSlice
+	flag.Var(&allowOrigins, "allow-origin", "allowed origin (may be repeated, e.g. --allow-origin http://localhost:3000 --allow-origin http://192.168.1.10:3000)")
 	flag.Parse()
+	cfg.AllowOrigins = allowOrigins
 	cfg.PollInterval = time.Duration(pollMS) * time.Millisecond
 
 	// Bind address: honour BINDING env var, default to localhost.
@@ -44,7 +56,7 @@ func ParseConfig() Config {
 		}
 	}
 
-	if cfg.AllowOrigin == "" {
+	if len(cfg.AllowOrigins) == 0 {
 		log.Fatal("--allow-origin is required (e.g. --allow-origin http://localhost:3000)")
 	}
 
