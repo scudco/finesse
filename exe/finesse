@@ -1,0 +1,21 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+require 'English'
+require_relative '../lib/finesse/platforms'
+
+args = ARGV.dup
+
+# If --db-path wasn't explicitly provided, try to resolve it from config/database.yml
+unless args.any? { |a| a.start_with?('--db-path') }
+  db_path = Finesse::Platforms.cable_db_path
+  args.unshift('--db-path', db_path) if db_path
+end
+
+# Derive FINESSE_SIGNING_KEY via Rails if not already set.
+if ENV['FINESSE_SIGNING_KEY'].nil? || ENV['FINESSE_SIGNING_KEY'].empty?
+  key = `bundle exec rails runner "print Finesse.signing_key" 2>/dev/null`.strip
+  ENV['FINESSE_SIGNING_KEY'] = key if $CHILD_STATUS.success? && !key.empty?
+end
+
+exec(Finesse::Platforms.executable, *args)
