@@ -89,11 +89,8 @@ The SSE endpoint supports the `Last-Event-ID` header for automatic reconnection 
 Requires Go 1.24+.
 
 ```sh
-# Build for current platform
-cd ext/finesse && go build -o ../../exe/$(ruby -e "puts Gem::Platform.local.cpu + '-' + Gem::Platform.local.os")/finesse .
-
-# Cross-compile for all platforms
-rake build:all
+bundle exec rake build:local   # Build for current platform
+bundle exec rake build:all     # Cross-compile for all platforms
 ```
 
 ### Running tests
