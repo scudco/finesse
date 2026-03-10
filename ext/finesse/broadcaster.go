@@ -22,6 +22,7 @@ type broadcaster struct {
 	channel   []byte
 	tableName string
 	stopCh    chan struct{}
+	doneCh    chan struct{}
 
 	mu       sync.Mutex
 	clients  map[chan []message]struct{}
@@ -36,6 +37,7 @@ func newBroadcaster(db *sql.DB, channel string, cfg Config) *broadcaster {
 		tableName: cfg.TableName,
 		clients:   make(map[chan []message]struct{}),
 		stopCh:    make(chan struct{}),
+		doneCh:    make(chan struct{}),
 	}
 	// Seed latestID so fresh connections don't replay history.
 	query := fmt.Sprintf("SELECT COALESCE(MAX(id), 0) FROM %s WHERE channel = ?", b.tableName)
@@ -45,6 +47,7 @@ func newBroadcaster(db *sql.DB, channel string, cfg Config) *broadcaster {
 }
 
 func (b *broadcaster) run(cfg Config) {
+	defer close(b.doneCh)
 	ticker := time.NewTicker(cfg.PollInterval)
 	defer ticker.Stop()
 	for {
@@ -136,6 +139,7 @@ func (b *broadcaster) unsubscribe(ch chan []message) {
 
 func (b *broadcaster) stop() {
 	close(b.stopCh)
+	<-b.doneCh
 }
 
 // broadcasterRegistry is a registry of per-channel broadcasters.
