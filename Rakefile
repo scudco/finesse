@@ -11,6 +11,27 @@ PLATFORMS = {
 
 GO_SRC = "ext/finesse"
 
+require "rake/testtask"
+
+namespace :test do
+  desc "Run Go tests"
+  task :go do
+    Dir.chdir(GO_SRC) do
+      sh "go test -v -count=1 ./..."
+    end
+  end
+
+  Rake::TestTask.new(:ruby) do |t|
+    t.libs << "test"
+    t.test_files = FileList["test/**/*_test.rb"]
+  end
+end
+
+desc "Run all tests"
+task test: ["test:go", "test:ruby"]
+
+task default: :test
+
 namespace :build do
   desc "Cross-compile Go binary for a specific platform (e.g., rake build:go[arm64-darwin])"
   task :go, [:platform] do |_t, args|
@@ -50,4 +71,9 @@ namespace :build do
       Rake::Task["build:go"].invoke(platform)
     end
   end
+end
+
+desc "Run tests, build all binaries, and package the gem"
+task release_build: ["test", "build:all"] do
+  sh "gem build finesse.gemspec"
 end
