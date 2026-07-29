@@ -131,10 +131,12 @@ func (b *broadcaster) subscribe(lastID int64) (chan []message, []message) {
 	return ch, catchup
 }
 
-func (b *broadcaster) unsubscribe(ch chan []message) {
+// unsubscribe removes a client and reports how many remain.
+func (b *broadcaster) unsubscribe(ch chan []message) int {
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	delete(b.clients, ch)
-	b.mu.Unlock()
+	return len(b.clients)
 }
 
 func (b *broadcaster) stop() {
@@ -158,15 +160,41 @@ func newBroadcasterRegistry(db *sql.DB, cfg Config) *broadcasterRegistry {
 	}
 }
 
-func (r *broadcasterRegistry) get(channel string) *broadcaster {
+// subscribe registers a client on the channel's broadcaster, creating it if
+// needed. Get-or-create and reaping both run under the registry lock, so a
+// joining client can never land on a stopped broadcaster.
+func (r *broadcasterRegistry) subscribe(channel string, lastID int64) (chan []message, []message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if b, ok := r.broadcasters[channel]; ok {
-		return b
+	b, ok := r.broadcasters[channel]
+	if !ok {
+		b = newBroadcaster(r.db, channel, r.cfg)
+		r.broadcasters[channel] = b
 	}
-	b := newBroadcaster(r.db, channel, r.cfg)
-	r.broadcasters[channel] = b
-	return b
+	return b.subscribe(lastID)
+}
+
+// unsubscribe removes a client. When the last one leaves, the broadcaster is
+// reaped: removed from the registry and its poll goroutine stopped. The next
+// subscriber gets a fresh broadcaster that re-seeds latestID from MAX(id),
+// so nothing is replayed.
+func (r *broadcasterRegistry) unsubscribe(channel string, ch chan []message) {
+	r.mu.Lock()
+	b, ok := r.broadcasters[channel]
+	if !ok {
+		// Already reaped by stopAll during shutdown.
+		r.mu.Unlock()
+		return
+	}
+	if b.unsubscribe(ch) > 0 {
+		r.mu.Unlock()
+		return
+	}
+	delete(r.broadcasters, channel)
+	r.mu.Unlock()
+	// Stop outside the lock: b is unreachable now, and stop() waits up to
+	// one poll interval for the goroutine to exit.
+	b.stop()
 }
 
 func (r *broadcasterRegistry) stopAll() {
@@ -175,4 +203,7 @@ func (r *broadcasterRegistry) stopAll() {
 	for _, b := range r.broadcasters {
 		b.stop()
 	}
+	// Clear the map so a handler's deferred unsubscribe, racing shutdown,
+	// cannot stop a broadcaster twice.
+	r.broadcasters = make(map[string]*broadcaster)
 }
