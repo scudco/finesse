@@ -14,17 +14,12 @@ GO_SRC = 'ext/finesse'
 require 'rake/testtask'
 
 namespace :test do
-  desc 'Run Go tests'
-  task :go do
-    Dir.chdir(GO_SRC) { sh 'go test -v -count=1 ./...' }
-  end
-
-  # Not in the default suite or CI. The race detector instruments every
-  # memory access and fails the run on unsynchronized reads/writes, which
-  # plain `go test` can miss even when assertions pass. Slower to build and
-  # run, so it lives here as an opt-in check: `rake test:go_race`.
+  # -race instruments every memory access and fails the run on
+  # unsynchronized reads/writes, which plain `go test` can miss even when
+  # assertions pass. Slower to build and run, but this suite is small;
+  # split it back into an opt-in task if it ever drags.
   desc 'Run Go tests under the race detector'
-  task :go_race do
+  task :go do
     Dir.chdir(GO_SRC) { sh 'go test -race -v -count=1 ./...' }
   end
 
