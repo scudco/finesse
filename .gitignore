@@ -14,5 +14,7 @@ exe/aarch64-linux/
 exe/x86_64-linux/
 ext/finesse/finesse
 
-# Local Claude Code settings
+# Local agent settings
 .claude/
+.omp/
+.worktrees/
