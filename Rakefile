@@ -19,6 +19,15 @@ namespace :test do
     Dir.chdir(GO_SRC) { sh 'go test -v -count=1 ./...' }
   end
 
+  # Not in the default suite or CI. The race detector instruments every
+  # memory access and fails the run on unsynchronized reads/writes, which
+  # plain `go test` can miss even when assertions pass. Slower to build and
+  # run, so it lives here as an opt-in check: `rake test:go_race`.
+  desc 'Run Go tests under the race detector'
+  task :go_race do
+    Dir.chdir(GO_SRC) { sh 'go test -race -v -count=1 ./...' }
+  end
+
   Rake::TestTask.new(:ruby) do |t|
     t.libs << 'test'
     t.test_files = FileList['test/**/*_test.rb']
