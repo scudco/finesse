@@ -14,9 +14,13 @@ GO_SRC = 'ext/finesse'
 require 'rake/testtask'
 
 namespace :test do
-  desc 'Run Go tests'
+  # -race instruments every memory access and fails the run on
+  # unsynchronized reads/writes, which plain `go test` can miss even when
+  # assertions pass. Slower to build and run, but this suite is small;
+  # split it back into an opt-in task if it ever drags.
+  desc 'Run Go tests under the race detector'
   task :go do
-    Dir.chdir(GO_SRC) { sh 'go test -v -count=1 ./...' }
+    Dir.chdir(GO_SRC) { sh 'go test -race -v -count=1 ./...' }
   end
 
   Rake::TestTask.new(:ruby) do |t|

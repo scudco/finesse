@@ -57,9 +57,8 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 		}
 	}
 
-	b := registry.get(channel)
-	ch, catchup := b.subscribe(lastID)
-	defer b.unsubscribe(ch)
+	ch, catchup := registry.subscribe(channel, lastID)
+	defer registry.unsubscribe(channel, ch)
 
 	log.Printf("client connected  channel=%.40s last_id=%d", channel, lastID)
 

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -209,21 +210,145 @@ func TestBroadcaster_BufferLimit(t *testing.T) {
 	}
 }
 
-func TestBroadcasterRegistry_GetOrCreate(t *testing.T) {
+func TestBroadcasterRegistry_SubscribeGetOrCreate(t *testing.T) {
 	db := setupTestDB(t)
 	cfg := testConfig()
 
 	r := newBroadcasterRegistry(db, cfg)
 	defer r.stopAll()
 
-	b1 := r.get("chat")
-	b2 := r.get("chat")
-	b3 := r.get("other")
+	r.subscribe("chat", -1)
+	r.subscribe("chat", -1)
+	r.subscribe("other", -1)
 
-	if b1 != b2 {
-		t.Fatal("expected same broadcaster for same channel")
+	r.mu.Lock()
+	count := len(r.broadcasters)
+	chatClients := len(r.broadcasters["chat"].clients)
+	r.mu.Unlock()
+
+	if count != 2 {
+		t.Fatalf("expected 2 broadcasters, got %d", count)
 	}
-	if b1 == b3 {
-		t.Fatal("expected different broadcaster for different channel")
+	if chatClients != 2 {
+		t.Fatalf("expected 2 clients on shared broadcaster, got %d", chatClients)
+	}
+}
+
+func TestBroadcasterRegistry_ReapOnLastUnsubscribe(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+
+	r := newBroadcasterRegistry(db, cfg)
+	defer r.stopAll()
+
+	ch1, _ := r.subscribe("chat", -1)
+	ch2, _ := r.subscribe("chat", -1)
+
+	r.mu.Lock()
+	b := r.broadcasters["chat"]
+	r.mu.Unlock()
+
+	r.unsubscribe("chat", ch1)
+
+	r.mu.Lock()
+	_, ok := r.broadcasters["chat"]
+	r.mu.Unlock()
+	if !ok {
+		t.Fatal("broadcaster reaped while a client remained")
+	}
+
+	r.unsubscribe("chat", ch2)
+
+	r.mu.Lock()
+	_, ok = r.broadcasters["chat"]
+	r.mu.Unlock()
+	if ok {
+		t.Fatal("broadcaster still registered after last unsubscribe")
+	}
+
+	select {
+	case <-b.doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("poll goroutine still running after reap")
+	}
+}
+
+func TestBroadcasterRegistry_ResubscribeAfterReap(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+
+	r := newBroadcasterRegistry(db, cfg)
+	defer r.stopAll()
+
+	ch1, _ := r.subscribe("chat", -1)
+	r.unsubscribe("chat", ch1)
+
+	// Rows inserted while nobody listens must not replay to the next client.
+	insertMessage(t, db, "chat", "<div>while-idle</div>")
+
+	ch2, catchup := r.subscribe("chat", -1)
+	defer r.unsubscribe("chat", ch2)
+
+	if len(catchup) != 0 {
+		t.Fatalf("expected no catch-up after reap, got %d messages", len(catchup))
+	}
+
+	insertMessage(t, db, "chat", "<div>live</div>")
+	select {
+	case msgs := <-ch2:
+		if len(msgs) != 1 || msgs[0].html != "<div>live</div>" {
+			t.Fatalf("unexpected live messages after resubscribe: %v", msgs)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no live delivery after resubscribe")
+	}
+}
+
+func TestBroadcasterRegistry_JoinLeaveRace(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+
+	r := newBroadcasterRegistry(db, cfg)
+	defer r.stopAll()
+
+	for range 200 {
+		chOld, _ := r.subscribe("chat", -1)
+
+		var chNew chan []message
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			r.unsubscribe("chat", chOld)
+		}()
+		go func() {
+			defer wg.Done()
+			chNew, _ = r.subscribe("chat", -1)
+		}()
+		wg.Wait()
+
+		// The joining client must be registered on the live broadcaster,
+		// whichever side won the race.
+		r.mu.Lock()
+		b, ok := r.broadcasters["chat"]
+		r.mu.Unlock()
+		if !ok {
+			t.Fatal("no broadcaster while a client is subscribed")
+		}
+		b.mu.Lock()
+		_, registered := b.clients[chNew]
+		b.mu.Unlock()
+		if !registered {
+			t.Fatal("joining client lost during reap race")
+		}
+
+		r.unsubscribe("chat", chNew)
+	}
+
+	r.mu.Lock()
+	leaked := len(r.broadcasters)
+	r.mu.Unlock()
+	if leaked != 0 {
+		t.Fatalf("leaked %d broadcasters after all clients left", leaked)
 	}
 }
