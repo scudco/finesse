@@ -6,6 +6,71 @@
 
 Finesse replaces ActionCable's WebSocket transport with a lightweight Go binary that polls SolidCable's SQLite table and streams Turbo updates to browsers via Server-Sent Events (SSE). No WebSocket infrastructure needed — just a single binary alongside your Rails app.
 
+In a fan-out benchmark against ActionCable on Puma, Finesse halved delivery latency at everyday load and kept delivering every message at a load that saturated Puma ([numbers below](#why-finesse)).
+
+## Why Finesse
+
+ActionCable holds every WebSocket open inside your Rails server, and each message rides through the Ruby pub/sub stack. Finesse moves that fan-out work into a small Go binary that speaks plain HTTP.
+
+### Benchmark
+
+Rails 8 in production mode, Puma defaults (single worker, 3 threads). Both servers read the same SolidCable SQLite table, polling at 10 ms. One broadcaster stamps each message with its send time; latency is broadcast to browser receipt. Apple M1.
+
+**Steady load** (10 broadcasts/s, 20 s windows, zero loss on both sides):
+
+| Clients | Finesse p50 / p99 | ActionCable p50 / p99 | Finesse CPU / RSS | ActionCable CPU / RSS |
+|--------:|------------------:|----------------------:|------------------:|----------------------:|
+| 1       | 7 ms / 12 ms      | 9 ms / 21 ms          | 4% / 21 MB        | 13% / 163 MB          |
+| 50      | 7 ms / 14 ms      | 11 ms / 28 ms         | 5% / 25 MB        | 17% / 167 MB          |
+| 200     | 10 ms / 19 ms     | 19 ms / 35 ms         | 7% / 31 MB        | 24% / 172 MB          |
+| 500     | 14 ms / 30 ms     | 24 ms / 42 ms         | 11% / 41 MB       | 29% / 180 MB          |
+
+**Stress** (100 broadcasts/s to 500 clients, about 50,000 deliveries/s):
+
+| | Finesse | ActionCable (Puma) |
+|---|---:|---:|
+| p50 latency | 10 ms | 5,575 ms |
+| p99 latency | 16 ms | 10,206 ms |
+| delivered | 100% (759k msgs) | 93.1% (428k msgs) |
+| CPU / RSS | 51% / 49 MB | 97% / 325 MB |
+
+```
+p50 latency at ~50,000 deliveries/s
+
+Finesse      ▏ 10 ms
+ActionCable  ████████████████████████████████████████ 5,575 ms
+```
+
+At steady load both are lossless; Finesse halves latency and runs on a fraction of ActionCable's CPU and memory. Past Puma's ceiling, latency climbs into seconds and messages drop, while Finesse stays under 20 ms at half a core.
+
+<details>
+<summary>Methodology</summary>
+
+- One `rails runner` loop broadcasts via `Turbo::StreamsChannel.broadcast_stream_to`, embedding an epoch-ms timestamp in each payload. Both servers poll the same `production_cable.sqlite3`.
+- SolidCable's `polling_interval` was set to 0.01 s to match Finesse's default, so the comparison measures transport, not poll frequency.
+- Clients: a Bun harness opening N SSE readers against Finesse or N real ActionCable WebSocket subscribers against Puma, all on one channel. Latency recorded per delivery over a 20 s window after all clients subscribed; CPU and RSS sampled from `ps` once per second.
+- Caveats: clients and servers shared one machine, everything ran on localhost without TLS, and Puma used its default single worker (`WEB_CONCURRENCY` would raise its ceiling at the cost of more memory).
+
+</details>
+
+### Simpler on the wire
+
+```
+ActionCable                               Finesse
+
+Browser ⇄ WS upgrade ⇄ Puma               Browser ──GET /events──> Go binary
+  JSON protocol: subscribe,                 one HTTP response that
+  confirm, ping/pong                        never ends (SSE frames)
+  missed messages on reconnect:             reconnect + catch-up built into
+  gone                                      EventSource (Last-Event-ID)
+```
+
+The server's whole job is to poll one SQLite table and write text frames to every connection holding a valid signed token. You can watch a live stream with `curl`.
+
+### The tradeoff: deployment
+
+ActionCable costs nothing to deploy because it already lives inside Puma. Finesse is a second process with its own port and proxy rule, and it needs the signing key handed across the Ruby/Go boundary. In development that is one Procfile line; in production it is one more service to run and monitor (see [Production Deployment](#production-deployment)). If your app broadcasts to a handful of tabs, ActionCable's zero-deploy story wins on simplicity of operations. Finesse wins on simplicity of runtime and on headroom.
+
 ## Prerequisites
 
 Finesse currently supports **SolidCable with SQLite** only. Your Rails app needs:
