@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -27,7 +29,10 @@ type Config struct {
 	TableName    string
 	PollInterval time.Duration
 	AllowOrigins []string
-	SigningKey   []byte
+	SigningKeys  [][]byte
+	Heartbeat    time.Duration // 0 disables
+	RetryMS      int           // 0 omits the retry: line
+	DrainTimeout time.Duration
 }
 
 // Postgres reports whether the PostgreSQL backend is configured.
@@ -44,6 +49,9 @@ func ParseConfig() Config {
 	flag.IntVar(&pollMS, "poll-interval", 0, "database poll interval in milliseconds (default 10 for SQLite, 1000 for PostgreSQL)")
 	var allowOrigins stringSlice
 	flag.Var(&allowOrigins, "allow-origin", "allowed origin (may be repeated, e.g. --allow-origin http://localhost:3000 --allow-origin http://192.168.1.10:3000)")
+	flag.DurationVar(&cfg.Heartbeat, "heartbeat", 20*time.Second, "interval between SSE keepalive comments (0 disables)")
+	flag.IntVar(&cfg.RetryMS, "retry", 2000, "EventSource reconnect delay in milliseconds sent at stream start (0 omits it)")
+	flag.DurationVar(&cfg.DrainTimeout, "drain-timeout", 25*time.Second, "on SIGTERM, how long open streams may live before they are closed")
 	flag.Parse()
 	cfg.AllowOrigins = allowOrigins
 	if pollMS <= 0 {
@@ -74,15 +82,36 @@ func ParseConfig() Config {
 
 	// FINESSE_SIGNING_KEY is the hex-encoded Turbo signed stream verifier key,
 	// derived from SECRET_KEY_BASE via PBKDF2 by the Ruby wrapper.
-	signingKeyHex := os.Getenv("FINESSE_SIGNING_KEY")
-	if signingKeyHex == "" {
-		log.Fatal("FINESSE_SIGNING_KEY environment variable is required")
-	}
+	// FINESSE_SIGNING_KEYS adds more (comma-separated) so keys can rotate
+	// without every process restarting at once.
 	var err error
-	cfg.SigningKey, err = hex.DecodeString(signingKeyHex)
+	cfg.SigningKeys, err = parseSigningKeys(os.Getenv("FINESSE_SIGNING_KEY"), os.Getenv("FINESSE_SIGNING_KEYS"))
 	if err != nil {
-		log.Fatalf("FINESSE_SIGNING_KEY must be valid hex: %v", err)
+		log.Fatal(err)
 	}
 
 	return cfg
+}
+
+// parseSigningKeys decodes the union of a single hex key and a comma-separated
+// list of hex keys. At least one key is required.
+func parseSigningKeys(single, list string) ([][]byte, error) {
+	var keys [][]byte
+	candidates := []string{single}
+	candidates = append(candidates, strings.Split(list, ",")...)
+	for _, c := range candidates {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		key, err := hex.DecodeString(c)
+		if err != nil {
+			return nil, fmt.Errorf("signing keys must be valid hex: %w", err)
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil, errors.New("FINESSE_SIGNING_KEY or FINESSE_SIGNING_KEYS environment variable is required")
+	}
+	return keys, nil
 }
