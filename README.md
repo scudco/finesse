@@ -4,7 +4,7 @@
 
 # Finesse
 
-Finesse replaces ActionCable's WebSocket transport with a lightweight Go binary that watches SolidCable's database (SQLite or PostgreSQL) and streams Turbo updates to browsers via Server-Sent Events (SSE). No WebSocket infrastructure needed — just a single binary alongside your Rails app.
+Finesse replaces ActionCable's WebSocket transport with a lightweight Go binary that watches SolidCable's database (SQLite or PostgreSQL) and streams Turbo updates to browsers via Server-Sent Events (SSE). Add the gem and one line to `config/puma.rb`, and Finesse starts, restarts, and stops with your app server.
 
 In a fan-out benchmark against ActionCable on Puma, Finesse halved delivery latency at everyday load and kept delivering every message at a load that saturated Puma ([numbers below](#why-finesse)).
 
@@ -67,9 +67,11 @@ Browser ⇄ WS upgrade ⇄ Puma               Browser ──GET /events──> G
 
 The server's whole job is to watch one database table and write text frames to every connection holding a valid signed token. You can watch a live stream with `curl`.
 
-### The tradeoff: deployment
+### Deployment: one line in `puma.rb`
 
-ActionCable costs nothing to deploy because it already lives inside Puma. Finesse is a second process with its own port and proxy rule, and it needs the signing key handed across the Ruby/Go boundary. In development that is one Procfile line; in production it is one more service to run and monitor (see [Production Deployment](#production-deployment)). If your app broadcasts to a handful of tabs, ActionCable's zero-deploy story wins on simplicity of operations. Finesse wins on simplicity of runtime and on headroom.
+ActionCable runs inside the Puma process and answers on Puma's port. Finesse runs as a child process that Puma starts on boot, restarts if it crashes, and stops on shutdown, the same way `plugin :solid_queue` runs Solid Queue. You don't run, supervise, or hand a signing key to anything yourself; the plugin reads the key from the booted Rails app.
+
+One difference remains: Finesse listens on its own port (4000 by default). Browsers connect to it directly, so in production your proxy needs a route to that port (see [Production Deployment](#production-deployment)). In exchange, fan-out leaves Puma's threads and memory alone.
 
 ## Prerequisites
 
@@ -78,7 +80,7 @@ Finesse supports **SolidCable on SQLite or PostgreSQL (14+)**. Your Rails app ne
 - **[SolidCable](https://github.com/rails/solid_cable)** as your ActionCable adapter, with a `cable:` database configured in `config/database.yml`
 - **[turbo-rails](https://github.com/hotwired/turbo-rails)** (>= 2.0) — Finesse uses Turbo's signed stream tokens for authentication
 
-The wrapper picks the backend from the cable database's `adapter` in `config/database.yml`: SQLite configs pass `--db-path` to the binary, PostgreSQL configs pass `--db-url`.
+Finesse picks the backend from the cable database's `adapter` in `config/database.yml`: SQLite configs use `--db-path`, PostgreSQL configs use `--db-url`. The Puma plugin and `bundle exec finesse` resolve it the same way.
 
 ## Quick Start
 
@@ -97,15 +99,22 @@ The wrapper picks the backend from the cable database's `adapter` in `config/dat
    plugin :finesse
    ```
 
-4. Start your app:
+4. Point your Turbo streams at Finesse. Where a view has `turbo_stream_from @chat`, render this instead:
+   ```erb
+   <%= tag.turbo_stream_source src: "http://localhost:4000/events?" +
+         { signed_stream: Turbo::StreamsChannel.signed_stream_name(@chat) }.to_query %>
+   ```
+   Turbo's `<turbo-stream-source>` opens an `EventSource` for any `http(s)` URL, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. In production, use your public Finesse URL.
+
+5. Start your app:
    ```sh
    bin/dev
    ```
 
-The Puma plugin starts the Finesse binary when Puma boots, restarts it if it crashes, and stops it when Puma stops. Because it runs inside your booted Rails process, the signing key is read in-process — no `rails runner` at boot. In development it allows `http://localhost:3000` by default; set `FINESSE_ALLOW_ORIGIN` for anything else.
+The plugin starts Finesse when Puma boots, restarts it after a crash, and stops it with Puma. In cluster mode it runs once, from the Puma master. In development it allows `http://localhost:3000`; set `FINESSE_ALLOW_ORIGIN` for anything else. If it can't start (no signing key, or no allowed origin outside development), it logs why and Puma carries on without it.
 
 <details>
-<summary>Alternative: run Finesse as a separate process</summary>
+<summary>Alternative: run Finesse as its own process</summary>
 
 Add to your `Procfile.dev`:
 ```
@@ -115,6 +124,8 @@ For multiple origins (e.g., accessing from another device on your network), repe
 ```
 sse: bundle exec finesse --allow-origin http://localhost:3000 --allow-origin http://192.168.1.10:3000
 ```
+
+The wrapper derives the signing key with `rails runner` before starting the binary, so boot takes a few seconds longer.
 
 </details>
 
@@ -150,7 +161,7 @@ Key design choices:
 
 | Variable | Description |
 |----------|-------------|
-| `FINESSE_SIGNING_KEY` | Hex-encoded HMAC key for signed stream verification (derived automatically by the Puma plugin and by `bundle exec finesse`) |
+| `FINESSE_SIGNING_KEY` | Hex-encoded HMAC key for signed stream verification. The Puma plugin and `bundle exec finesse` derive it from Rails when unset |
 | `BINDING` | Bind address (default: `127.0.0.1`) |
 | `FINESSE_ALLOW_ORIGIN` | Puma plugin only: comma-separated allowed origins. Defaults to `http://localhost:3000` when `RAILS_ENV`/`RACK_ENV` is development or unset; required otherwise |
 | `FINESSE_PORT` | Puma plugin only: listen port passed as `--port` (default `4000`) |
@@ -185,10 +196,13 @@ bundle exec rake test:go       # Go tests only
 bundle exec rake test:ruby     # Ruby tests only
 ```
 
+The PostgreSQL integration test runs only when `FINESSE_TEST_PG_URL` points at a PostgreSQL 14+ database, e.g. `FINESSE_TEST_PG_URL="dbname=finesse_test" bundle exec rake test:go`.
+
 ### Running locally
 
 ```sh
-./exe/arm64-darwin/finesse --port 4000 --db-path ../your-app/storage/development_cable.sqlite3
+FINESSE_SIGNING_KEY=<hex> ./exe/arm64-darwin/finesse --allow-origin http://localhost:3000 \
+  --db-path ../your-app/storage/development_cable.sqlite3
 ```
 
 ## Security
@@ -197,20 +211,20 @@ Finesse verifies every SSE connection using Turbo's signed stream tokens (HMAC-S
 
 ### Signing Key Flow
 
-**TL;DR:** Finesse needs the same HMAC key that Turbo uses to sign stream names. The Ruby wrapper extracts it from Rails automatically — zero config in development.
+**TL;DR:** Finesse needs the same HMAC key that Turbo uses to sign stream names. The Puma plugin reads it from the booted Rails app and passes it to the binary. No setup.
 
 The problem: Finesse is a standalone Go binary, but it needs to verify tokens that Rails signs. Rails derives its signing key from `SECRET_KEY_BASE` via PBKDF2, and that secret lives in encrypted credentials (`config/credentials.yml.enc`) which require Ruby's `Marshal` deserializer to read. Reimplementing that in Go would be fragile and version-dependent.
 
 The solution: let Ruby do the Ruby parts, then hand the result to Go.
 
 ```
-        Rails Boot                           Finesse Boot
-        ──────────                           ────────────
+        Rails Boot                           Finesse Boot (Puma plugin)
+        ──────────                           ──────────────────────────
 
-config/credentials.yml.enc           exe/finesse (Ruby wrapper)
+config/credentials.yml.enc           plugin :finesse, inside booted Rails
            │                                    │
            ▼                                    ▼
-      SECRET_KEY_BASE                rails runner "Finesse.signing_key"
+      SECRET_KEY_BASE                Finesse.signing_key
            │                                    │
            ▼                                    ▼
       PBKDF2-HMAC-SHA256             Turbo.signed_stream_verifier_key
@@ -219,10 +233,10 @@ config/credentials.yml.enc           exe/finesse (Ruby wrapper)
       iterations: 65,536             hex-encode the derived key
       output: 64 bytes                          │
            │                                    ▼
-           ▼                         ENV["FINESSE_SIGNING_KEY"] = hex
-      Turbo.signed_stream_                      │
-        verifier_key                            ▼
-           │                         exec(go_binary)
+           ▼                         spawn(go_binary) with
+      Turbo.signed_stream_             FINESSE_SIGNING_KEY=hex
+        verifier_key                            │
+           │                                    ▼
            ▼                           ├── reads env, decodes hex
       turbo_stream_from @chat          └── verifies HMAC on every
       signs channel name ─────────▶  /events?signed_stream=<token>
@@ -235,11 +249,11 @@ base64strict(json(channel_name))--hex(hmac_sha256(base64_data, derived_key))
 
 The Go binary splits the token on `--`, recomputes the HMAC over the base64 data, and compares using constant-time `hmac.Equal`. If it matches, the channel name is trusted.
 
-**In development**, this is fully automatic — Rails writes `secret_key_base` to `tmp/local_secret.txt` and the wrapper reads it. **In production**, either let the wrapper derive the key at boot (slower — spawns a `rails runner`), or set `FINESSE_SIGNING_KEY` directly as a hex-encoded env var to skip the Rails boot entirely.
+**Without the plugin**, `bundle exec finesse` gets the same key by running `rails runner "print Finesse.signing_key"` before it execs the binary. That boots Rails once per start, so in production set `FINESSE_SIGNING_KEY` as a hex-encoded env var to skip it. Either way, development needs no setup: Rails keeps `secret_key_base` in `tmp/local_secret.txt`.
 
 ## Production Deployment
 
-Finesse binds to `127.0.0.1` by default and should **not** be exposed directly on port 80/443. Run it alongside your app server (Puma, etc.) on the same host and proxy to it from your web server. For example, with Nginx:
+Finesse binds to `127.0.0.1` by default and should **not** be exposed directly on port 80/443. With the Puma plugin it runs next to Puma on the same host; set `FINESSE_ALLOW_ORIGIN` to your production origin (the plugin won't start without it outside development) and proxy a path to it from your web server. For example, with Nginx:
 
 ```nginx
 upstream finesse {
@@ -260,7 +274,7 @@ location /finesse/ {
 
 ### Kamal
 
-If you deploy with [Kamal](https://kamal-deploy.org), add Finesse as a separate server role in `config/deploy.yml`. kamal-proxy automatically detects `Content-Type: text/event-stream` responses and disables buffering — no extra proxy configuration needed.
+If you deploy with [Kamal](https://kamal-deploy.org), run Finesse as its own server role in `config/deploy.yml`. kamal-proxy forwards each role's container to a single `app_port`, so it cannot reach a Finesse started by the plugin inside the web container. kamal-proxy detects `Content-Type: text/event-stream` responses and disables buffering, so the role needs no extra proxy configuration.
 
 ```yaml
 servers:
@@ -283,12 +297,21 @@ servers:
 
 Point a DNS record for `sse.yourapp.com` at your server and kamal-proxy handles TLS and routing.
 
-Set `FINESSE_SIGNING_KEY` as a hex-encoded env var in production to avoid a `rails runner` invocation on every boot. The `--allow-origin` flag should match your production domain.
+Set `FINESSE_SIGNING_KEY` as a hex-encoded env var to avoid a `rails runner` invocation on every boot. The `--allow-origin` flag should match your production domain.
+
+If `config/puma.rb` has `plugin :finesse`, the web role's Puma will also try to start Finesse. Without `FINESSE_ALLOW_ORIGIN` it logs a line and skips, but if you set that variable in Kamal's top-level `env` (which every role inherits) you get a second, unreachable copy. Guard the plugin the way Rails 8's generated `puma.rb` guards Solid Queue:
+
+```ruby
+plugin :finesse if ENV["FINESSE_IN_PUMA"]
+```
+
+Set `FINESSE_IN_PUMA=1` in development and leave it unset in production.
 
 ## Roadmap
 
-- **Rails generator** — `rails g finesse:install` for config, initializer, and binstub
-- **Engine/Railtie** — view helpers (`finesse_sse_url`)
+- **Rails generator**: `rails g finesse:install` to add the plugin line and allowed origins
+- **View helper**: `finesse_stream_from @chat` to replace the hand-built `turbo-stream-source` tag in Quick Start
+- **Server features**: heartbeats, `retry:`, clean drain on deploy, and table-backed replay, from [docs/realtime-horizon.md](docs/realtime-horizon.md) and [docs/deployment-qol.md](docs/deployment-qol.md)
 
 ## License
 
