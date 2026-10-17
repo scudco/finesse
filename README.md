@@ -92,19 +92,31 @@ The wrapper picks the backend from the cable database's `adapter` in `config/dat
    bundle install
    ```
 
-3. Add to your `Procfile.dev`:
-   ```
-   sse: bundle exec finesse --allow-origin http://localhost:3000
-   ```
-   For multiple origins (e.g., accessing from another device on your network), repeat the flag:
-   ```
-   sse: bundle exec finesse --allow-origin http://localhost:3000 --allow-origin http://192.168.1.10:3000
+3. Add to your `config/puma.rb`:
+   ```ruby
+   plugin :finesse
    ```
 
 4. Start your app:
    ```sh
    bin/dev
    ```
+
+The Puma plugin starts the Finesse binary when Puma boots, restarts it if it crashes, and stops it when Puma stops. Because it runs inside your booted Rails process, the signing key is read in-process — no `rails runner` at boot. In development it allows `http://localhost:3000` by default; set `FINESSE_ALLOW_ORIGIN` for anything else.
+
+<details>
+<summary>Alternative: run Finesse as a separate process</summary>
+
+Add to your `Procfile.dev`:
+```
+sse: bundle exec finesse --allow-origin http://localhost:3000
+```
+For multiple origins (e.g., accessing from another device on your network), repeat the flag:
+```
+sse: bundle exec finesse --allow-origin http://localhost:3000 --allow-origin http://192.168.1.10:3000
+```
+
+</details>
 
 ## How It Works
 
@@ -138,8 +150,10 @@ Key design choices:
 
 | Variable | Description |
 |----------|-------------|
-| `FINESSE_SIGNING_KEY` | Hex-encoded HMAC key for signed stream verification (auto-derived from Rails when using `bundle exec finesse`) |
+| `FINESSE_SIGNING_KEY` | Hex-encoded HMAC key for signed stream verification (derived automatically by the Puma plugin and by `bundle exec finesse`) |
 | `BINDING` | Bind address (default: `127.0.0.1`) |
+| `FINESSE_ALLOW_ORIGIN` | Puma plugin only: comma-separated allowed origins. Defaults to `http://localhost:3000` when `RAILS_ENV`/`RACK_ENV` is development or unset; required otherwise |
+| `FINESSE_PORT` | Puma plugin only: listen port passed as `--port` (default `4000`) |
 
 ## Endpoints
 
