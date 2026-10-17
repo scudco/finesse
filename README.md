@@ -328,6 +328,61 @@ plugin :finesse if ENV["FINESSE_IN_PUMA"]
 
 Set `FINESSE_IN_PUMA=1` in development and leave it unset in production.
 
+#### Kamal accessory (no Rails in the container)
+
+The role above boots your Rails image to run Finesse. If you want Finesse deployed on its own, run the published image as a Kamal [accessory](https://kamal-deploy.org/docs/configuration/accessories/). The image is a static Go binary on `scratch`: no Ruby, no Rails, and no key derivation at boot. It listens on `0.0.0.0:4000` and takes the same flags as the binary.
+
+Accessories support the same `proxy:` block as roles. Kamal's accessory docs say "You can run your accessory behind the Kamal proxy" ([Accessories, Proxy](https://kamal-deploy.org/docs/configuration/accessories/#proxy)), and Kamal's source runs `kamal-proxy deploy` for any accessory with a `proxy` key when it boots or starts ([`lib/kamal/cli/accessory.rb`](https://github.com/basecamp/kamal/blob/main/lib/kamal/cli/accessory.rb), checked against Kamal 2.12). So kamal-proxy routes and terminates TLS for Finesse the same way it does for the web role.
+
+```yaml
+accessories:
+  finesse:
+    image: ghcr.io/scudco/finesse:latest # pin a version, e.g. :0.2.0, in production
+    host: <your-public-server-ip>
+    cmd: --allow-origin https://yourapp.com --db-path /rails/storage/production_cable.sqlite3 --drain-timeout 25s
+    env:
+      secret:
+        - FINESSE_SIGNING_KEY
+    volumes:
+      - "yourapp_storage:/rails/storage"
+    options:
+      stop-timeout: 30
+    proxy:
+      ssl: true
+      host: sse.yourapp.com
+      app_port: 4000
+      healthcheck:
+        path: /up
+```
+
+Point a DNS record for `sse.yourapp.com` at the server. Then `kamal accessory boot finesse` starts the container and registers it with kamal-proxy. The image tag is the gem version, so keep the two in step. The `ghcr.io/scudco/finesse` package must be public for the server to pull it without a login.
+
+**Signing key.** The container can't derive the key, so compute it once where Rails runs and store it as a Kamal secret. In `.kamal/secrets`:
+
+```sh
+FINESSE_SIGNING_KEY=$(RAILS_ENV=production bin/rails finesse:signing_key)
+```
+
+`finesse:signing_key` ships with the gem and prints `Finesse.signing_key`. To rotate `secret_key_base`, set `FINESSE_SIGNING_KEYS` to a comma-separated list of the old and new keys, add it to the accessory's `env.secret`, and run `kamal accessory reboot finesse`. Finesse accepts a token signed with any listed key. Drop the old key once pages carrying old tokens have expired.
+
+**Origins.** `--allow-origin` goes in `cmd`. Repeat it for each origin.
+
+**SQLite.** Finesse reads the same file Rails writes, so the accessory needs the same storage as the web container, on the same host. Kamal's default Rails `deploy.yml` mounts a named volume for this (`"yourapp_storage:/rails/storage"`). Mount the same volume in the accessory, as above, and point `--db-path` at the cable database inside it. The `host:` must be a server that also runs `web`.
+
+**PostgreSQL.** There is no file to share. Drop the volume and `--db-path`, and pass `--db-url`. The Go driver (pgx) fills anything missing from the URL from the standard `PG*` environment variables ([pgx `ParseConfig`](https://pkg.go.dev/github.com/jackc/pgx/v5/pgconn#ParseConfig)), so keep the password out of `deploy.yml` by sending it as a secret:
+
+```yaml
+    cmd: --allow-origin https://yourapp.com --db-url "host=db.internal dbname=yourapp_cable user=yourapp sslmode=verify-full"
+    env:
+      secret:
+        - FINESSE_SIGNING_KEY
+        - PGPASSWORD
+```
+
+The image includes CA certificates, so `sslmode=verify-full` works against a managed database.
+
+**Deploys and draining.** Accessories are not redeployed with your app and "do not have zero-downtime deployments" ([Accessories](https://kamal-deploy.org/docs/configuration/accessories/)). Upgrade Finesse with `kamal accessory reboot finesse`. Browsers reconnect and resume with `Last-Event-ID`. On SIGTERM Finesse keeps open streams alive for `--drain-timeout` (25s by default) and then closes them. Kamal stops an accessory with a plain `docker container stop`, which waits 10 seconds before SIGKILL, so `stop-timeout: 30` in `options` (passed to `docker run --stop-timeout`) lets the drain finish. Kamal's own `drain_timeout` defaults to 30 seconds ([Configuration, Drain timeout](https://kamal-deploy.org/docs/configuration/overview/#drain-timeout)). It is what kamal-proxy uses while draining a target, so keep `--drain-timeout` below both numbers.
+
 ## Roadmap
 
 - **Rails generator**: `rails g finesse:install` to add the plugin line and allowed origins
