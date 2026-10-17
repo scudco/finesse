@@ -82,6 +82,8 @@ Finesse supports **SolidCable on SQLite or PostgreSQL (14+)**. Your Rails app ne
 
 Finesse picks the backend from the cable database's `adapter` in `config/database.yml`: SQLite configs use `--db-path`, PostgreSQL configs use `--db-url`. The Puma plugin and `bundle exec finesse` resolve it the same way.
 
+SolidCable 4.1 writes broadcasts from a background thread. A short-lived process such as `bin/rails runner` can exit before the row is written, and that broadcast never reaches Finesse (or ActionCable). Broadcasts from requests, jobs, and the console are fine; in a script, `sleep 0.5` after the last broadcast.
+
 ## Quick Start
 
 1. Add to your Gemfile:
@@ -398,9 +400,12 @@ The image includes CA certificates, so `sslmode=verify-full` works against a man
 
 ## Roadmap
 
-- **Rails generator**: `rails g finesse:install` to add the plugin line and allowed origins
-- **View helper**: `finesse_stream_from @chat` to replace the hand-built `turbo-stream-source` tag in Quick Start
-- **Server features**: heartbeats, `retry:`, clean drain on deploy, and table-backed replay, from [docs/realtime-horizon.md](docs/realtime-horizon.md) and [docs/deployment-qol.md](docs/deployment-qol.md)
+- **Reconnect jitter**: `retry:` is a fixed delay, so a restart sends every tab back at the same moment. Add per-client jitter if reconnect bursts show up in practice.
+- **Long PostgreSQL transactions**: a row whose transaction commits more than 10 seconds after a higher id was delivered is missed. Raise the window, or fall back to a periodic table scan, if real apps hold broadcast transactions that long.
+- **Client packaging**: the browser client ships for importmap. Publish it to npm when a jsbundling user asks, instead of copying the file.
+- **One connection for many streams**: a page with several `finesse_stream_from` tags opens one stream per tag. Named SSE events could carry them all on one connection; tab sharing already cuts the count, so this waits for a page that needs it.
+
+[docs/realtime-horizon.md](docs/realtime-horizon.md) and [docs/deployment-qol.md](docs/deployment-qol.md) cover what was considered and rejected (WebTransport, stream compression, per-tenant servers) and why.
 
 ## License
 
