@@ -1,13 +1,13 @@
 # Finesse
 
-SSE server gem that replaces ActionCable's WebSocket transport. A Ruby gem wraps a Go binary that polls SolidCable's SQLite table and streams Turbo updates to browsers via Server-Sent Events.
+SSE server gem that replaces ActionCable's WebSocket transport. A Ruby gem wraps a Go binary that watches SolidCable's database (SQLite or PostgreSQL 14+) and streams Turbo updates to browsers via Server-Sent Events.
 
 ## Architecture
 
 Two languages, clear boundary:
 
-- **Ruby side** (`lib/`, `exe/finesse`) — gem packaging, platform detection, signing key derivation from Rails secrets. The exe wrapper is the entrypoint: it resolves the db path, derives the HMAC signing key via `rails runner`, then `exec`s the Go binary.
-- **Go side** (`ext/finesse/`) — the actual SSE server. Polls SQLite, verifies signed stream tokens (HMAC-SHA256), fans out to connected browsers. Zero Ruby dependencies at runtime.
+- **Ruby side** (`lib/`, `exe/finesse`) — gem packaging, platform detection, signing key derivation from Rails secrets. The exe wrapper is the entrypoint: it resolves the db path (SQLite) or DSN (Postgres), derives the HMAC signing key via `rails runner`, then `exec`s the Go binary.
+- **Go side** (`ext/finesse/`) — the actual SSE server. Watches SolidCable's table (SQLite polling, or Postgres LISTEN/NOTIFY with a polling safety net), verifies signed stream tokens (HMAC-SHA256), fans out to connected browsers. Zero Ruby dependencies at runtime.
 
 The signing key flow is the most complex part: Rails encrypts `secret_key_base` in credentials, derives a signing key via PBKDF2, and Turbo uses it to sign channel names. The Ruby wrapper extracts this derived key and passes it as a hex env var (`FINESSE_SIGNING_KEY`) to the Go binary, which uses it to verify tokens on every `/events` request.
 
@@ -17,10 +17,11 @@ The signing key flow is the most complex part: Rails encrypts `secret_key_base` 
 exe/finesse                    Ruby wrapper — resolves db path + signing key, execs Go binary
 lib/finesse.rb                 Finesse.signing_key — hex-encodes Turbo's verifier key
 lib/finesse/platforms.rb       Platform detection, binary path resolution, database.yml parsing
-ext/finesse/main.go            Server entrypoint — SQLite WAL setup, HTTP routing, graceful shutdown
+ext/finesse/main.go            Server entrypoint — HTTP routing, Postgres NOTIFY listener startup, graceful shutdown
 ext/finesse/config.go          CLI flag parsing, env var reading, input validation
+ext/finesse/store.go           Backend open (SQLite WAL / pgx), ?→$n binding, pg_notify trigger install + LISTEN loop
 ext/finesse/handler.go         SSE handler, HMAC token verification, CORS, Turbo payload extraction
-ext/finesse/broadcaster.go     Per-channel polling, ring buffer (200 msgs), client fan-out
+ext/finesse/broadcaster.go     Per-channel polling + notify wakeup, ring buffer (200 msgs), client fan-out
 ```
 
 ## Commands
@@ -38,12 +39,14 @@ Always use `bundle exec` — Ruby tests spawn subprocesses that need the gem's l
 
 ## Test Structure
 
-- `test/exe/finesse_test.rb` — exe wrapper integration tests (db-path injection, flag passthrough)
+- `test/exe/finesse_test.rb` — exe wrapper integration tests (db-path/db-url injection, flag passthrough)
 - `test/lib/finesse_test.rb` — signing key derivation (stubs Turbo module)
-- `test/lib/finesse/platforms_test.rb` — platform detection, binary resolution, database.yml parsing
+- `test/lib/finesse/platforms_test.rb` — platform detection, binary resolution, database.yml parsing, Postgres DSN building
 - `ext/finesse/handler_test.go` — token verification, payload extraction, SSE formatting, CORS
-- `ext/finesse/broadcaster_test.go` — subscriptions, catchup, fan-out, channel isolation, buffer limits
+- `ext/finesse/broadcaster_test.go` — subscriptions, catchup, fan-out, channel isolation, buffer limits, notify wakeup
 - `ext/finesse/config_test.go` — required flag/env validation (subprocess exit-code tests)
+- `ext/finesse/store_test.go` — `?`→`$n` placeholder binding
+- `ext/finesse/postgres_test.go` — end-to-end LISTEN/NOTIFY against a real PG (skipped unless `FINESSE_TEST_PG_URL` is set)
 
 ## Token Format
 

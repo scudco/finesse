@@ -48,14 +48,32 @@ module Finesse
         exe
       end
 
-      # Resolve the cable database path from config/database.yml.
+      # Resolve the cable database section from config/database.yml.
       # Returns nil if the file doesn't exist or no cable DB is configured.
-      def cable_db_path
+      def cable_db_config
         config = load_database_yml
         return nil unless config
 
         env_config = config.dig(ENV.fetch('RAILS_ENV', 'development'), 'cable')
-        env_config['database'] if env_config.is_a?(Hash)
+        env_config.is_a?(Hash) ? env_config : nil
+      end
+
+      # SQLite database path, or nil when the cable DB is PostgreSQL.
+      def cable_db_path
+        config = cable_db_config
+        return nil if config.nil? || postgres?(config)
+
+        config['database']
+      end
+
+      # libpq connection string for the cable DB, or nil unless PostgreSQL.
+      def cable_db_url
+        config = cable_db_config
+        return nil if config.nil? || !postgres?(config)
+        return config['url'] if config['url']
+
+        dsn = dsn_pairs(config).compact.map { |k, v| "#{k}=#{dsn_quote(v)}" }.join(' ')
+        dsn.empty? ? nil : dsn
       end
 
       private
@@ -69,6 +87,23 @@ module Finesse
 
         yaml = ERB.new(File.read(config_path)).result
         YAML.safe_load(yaml, permitted_classes: [Symbol], aliases: true)
+      end
+
+      def postgres?(config)
+        config['adapter'].to_s.start_with?('postgres')
+      end
+
+      def dsn_pairs(config)
+        { 'dbname' => config['database'], 'host' => config['host'], 'port' => config['port'],
+          'user' => config['username'], 'password' => config['password'] }
+      end
+
+      # Quote a libpq DSN value when it contains spaces, quotes, or is empty.
+      def dsn_quote(value)
+        s = value.to_s
+        return s unless s.empty? || s.match?(/[\s'\\]/)
+
+        "'#{s.gsub(/[\\']/) { |c| "\\#{c}" }}'"
       end
     end
   end

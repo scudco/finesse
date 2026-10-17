@@ -23,11 +23,15 @@ type Config struct {
 	Port         int
 	Bind         string
 	DBPath       string
+	DBURL        string
 	TableName    string
 	PollInterval time.Duration
 	AllowOrigins []string
-	SigningKey    []byte
+	SigningKey   []byte
 }
+
+// Postgres reports whether the PostgreSQL backend is configured.
+func (c Config) Postgres() bool { return c.DBURL != "" }
 
 // ParseConfig reads CLI flags and returns a Config.
 func ParseConfig() Config {
@@ -35,12 +39,20 @@ func ParseConfig() Config {
 	var pollMS int
 	flag.IntVar(&cfg.Port, "port", 4000, "HTTP listen port")
 	flag.StringVar(&cfg.DBPath, "db-path", "storage/development_cable.sqlite3", "path to SolidCable SQLite database")
+	flag.StringVar(&cfg.DBURL, "db-url", "", "PostgreSQL connection URL or DSN (selects the PostgreSQL backend)")
 	flag.StringVar(&cfg.TableName, "table-name", "solid_cable_messages", "SolidCable messages table name")
-	flag.IntVar(&pollMS, "poll-interval", 10, "database poll interval in milliseconds")
+	flag.IntVar(&pollMS, "poll-interval", 0, "database poll interval in milliseconds (default 10 for SQLite, 1000 for PostgreSQL)")
 	var allowOrigins stringSlice
 	flag.Var(&allowOrigins, "allow-origin", "allowed origin (may be repeated, e.g. --allow-origin http://localhost:3000 --allow-origin http://192.168.1.10:3000)")
 	flag.Parse()
 	cfg.AllowOrigins = allowOrigins
+	if pollMS <= 0 {
+		if cfg.Postgres() {
+			pollMS = 1000 // NOTIFY delivers instantly; polling is only the safety net
+		} else {
+			pollMS = 10
+		}
+	}
 	cfg.PollInterval = time.Duration(pollMS) * time.Millisecond
 
 	// Bind address: honour BINDING env var, default to localhost.

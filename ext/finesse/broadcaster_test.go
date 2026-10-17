@@ -352,3 +352,53 @@ func TestBroadcasterRegistry_JoinLeaveRace(t *testing.T) {
 		t.Fatalf("leaked %d broadcasters after all clients left", leaked)
 	}
 }
+
+func TestBroadcaster_WakeTriggersImmediatePoll(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	cfg.PollInterval = time.Hour // only wake() can deliver within the test
+	b := newBroadcaster(db, "chat", cfg)
+	defer b.stop()
+
+	ch, catchup := b.subscribe(-1)
+	if len(catchup) != 0 {
+		t.Fatalf("expected no catchup, got %d", len(catchup))
+	}
+
+	insertMessage(t, db, "chat", "<div>hi</div>")
+	b.wake()
+
+	select {
+	case msgs := <-ch:
+		if len(msgs) != 1 || msgs[0].html != "<div>hi</div>" {
+			t.Fatalf("unexpected messages: %+v", msgs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("wake did not trigger a poll")
+	}
+}
+
+func TestBroadcasterRegistry_WakeRoutesToChannel(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+	cfg.PollInterval = time.Hour
+	r := newBroadcasterRegistry(db, cfg)
+	defer r.stopAll()
+
+	ch, _ := r.subscribe("chat", -1)
+	defer r.unsubscribe("chat", ch)
+
+	r.wake("nobody-listening") // must not panic or create a broadcaster
+
+	insertMessage(t, db, "chat", "<div>pg</div>")
+	r.wake("chat")
+
+	select {
+	case msgs := <-ch:
+		if len(msgs) != 1 || msgs[0].html != "<div>pg</div>" {
+			t.Fatalf("unexpected messages: %+v", msgs)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("registry wake did not reach the broadcaster")
+	}
+}
