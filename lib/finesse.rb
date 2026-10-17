@@ -12,3 +12,5 @@ module Finesse
     Turbo.signed_stream_verifier_key.unpack1('H*')
   end
 end
+
+require_relative 'finesse/railtie' if defined?(Rails::Railtie)

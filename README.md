@@ -94,17 +94,20 @@ Finesse picks the backend from the cable database's `adapter` in `config/databas
    bundle install
    ```
 
-3. Add to your `config/puma.rb`:
+3. Run the generator:
+   ```sh
+   bin/rails g finesse:install
+   ```
+   It adds this line to `config/puma.rb` (once, so re-running is safe) and creates `config/initializers/finesse.rb`:
    ```ruby
    plugin :finesse
    ```
 
 4. Point your Turbo streams at Finesse. Where a view has `turbo_stream_from @chat`, render this instead:
    ```erb
-   <%= tag.turbo_stream_source src: "http://localhost:4000/events?" +
-         { signed_stream: Turbo::StreamsChannel.signed_stream_name(@chat) }.to_query %>
+   <%= finesse_stream_from @chat %>
    ```
-   Turbo's `<turbo-stream-source>` opens an `EventSource` for any `http(s)` URL, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. In production, use your public Finesse URL.
+   It takes the same arguments as `turbo_stream_from`, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. It points the stream at `http://localhost:4000` by default. In production, set `config.finesse.url` or the `FINESSE_URL` env var to your public Finesse URL.
 
 5. Start your app:
    ```sh
@@ -164,6 +167,7 @@ Key design choices:
 | `FINESSE_SIGNING_KEY` | Hex-encoded HMAC key for signed stream verification. The Puma plugin and `bundle exec finesse` derive it from Rails when unset |
 | `BINDING` | Bind address (default: `127.0.0.1`) |
 | `FINESSE_ALLOW_ORIGIN` | Puma plugin only: comma-separated allowed origins. Defaults to `http://localhost:3000` when `RAILS_ENV`/`RACK_ENV` is development or unset; required otherwise |
+| `FINESSE_URL` | Default for `config.finesse.url`, the public URL `finesse_stream_from` points browsers at (default `http://localhost:$FINESSE_PORT`) |
 | `FINESSE_PORT` | Puma plugin only: listen port passed as `--port` (default `4000`) |
 
 ## Endpoints
@@ -271,6 +275,16 @@ location /finesse/ {
   proxy_read_timeout 86400s;
 }
 ```
+
+### systemd
+
+To run Finesse as its own service, generate a unit file:
+
+```sh
+bin/rails g finesse:systemd --origin https://yourapp.com --user deploy
+```
+
+This writes `config/finesse.service`, which runs `bundle exec finesse --allow-origin <origin>` from your app root and restarts it on failure. Copy it to `/etc/systemd/system/` and run `systemctl enable --now finesse`. Set `FINESSE_SIGNING_KEY` in the unit to skip the `rails runner` boot.
 
 ### Kamal
 
