@@ -19,9 +19,10 @@ lib/finesse.rb                 Finesse.signing_key — hex-encodes Turbo's verif
 lib/finesse/platforms.rb       Platform detection, binary path resolution, database.yml parsing
 app/assets/javascripts/finesse.js  <finesse-stream-source>: Web Lock leader tab, BroadcastChannel fan-out, bfcache-safe
 config/importmap.rb            `pin "finesse"` (registered by the Railtie)
-lib/finesse/railtie.rb         config.finesse.url, includes the helper into ActionView, adds the JS dir to asset paths + importmap (loaded only if Rails::Railtie is defined)
+lib/finesse/railtie.rb         config.finesse.url, includes the helper into ActionView, adds the JS dir to asset paths + importmap, finesse:signing_key rake task (loaded only if Rails::Railtie is defined)
 lib/finesse/streams_helper.rb  finesse_stream_from view helper
 lib/generators/finesse/        finesse:install (puma.rb + initializer + `import "finesse"`) and finesse:systemd (config/finesse.service)
+Dockerfile                     Scratch image: static Go binary + CA certs, built by .github/workflows/image.yml
 lib/puma/plugin/finesse.rb     Puma plugin shim — makes `plugin :finesse` resolvable in puma.rb
 lib/finesse/puma_plugin.rb     Puma plugin logic — spawns/monitors/stops the Go binary from inside Puma
 ext/finesse/main.go            Server entrypoint — HTTP routing, version, Postgres NOTIFY listener startup, drain-then-stop shutdown
@@ -50,6 +51,7 @@ Always use `bundle exec` — Ruby tests spawn subprocesses that need the gem's l
 - `test/lib/finesse_test.rb` — signing key derivation (stubs Turbo module)
 - `test/lib/finesse/railtie_test.rb` — asset path, precompile, and importmap registration
 - `test/lib/finesse/platforms_test.rb` — platform detection, binary resolution, database.yml parsing, Postgres DSN building
+- `test/lib/finesse/railtie_test.rb` — `finesse:signing_key` rake task prints the key
 - `test/lib/finesse/streams_helper_test.rb` — finesse_stream_from output (src, token escaping, attributes, url)
 - `test/lib/generators/finesse/*_test.rb` — install idempotence + puma.rb append, systemd unit contents
 - `test/lib/finesse/puma_plugin_test.rb` — plugin command/env assembly, origin parsing, skip-on-misconfiguration

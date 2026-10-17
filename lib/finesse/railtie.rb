@@ -4,9 +4,9 @@ require 'rails/railtie'
 require_relative 'streams_helper'
 
 module Finesse
-  # Adds `config.finesse.url`, the `finesse_stream_from` view helper, and the
+  # Adds `config.finesse.url`, the `finesse_stream_from` view helper, the
   # `finesse` JavaScript module (served through the asset pipeline, pinned for
-  # importmap-rails).
+  # importmap-rails), and the `finesse:signing_key` rake task.
   class Railtie < Rails::Railtie
     JS_DIR = File.expand_path('../../app/assets/javascripts', __dir__)
     IMPORTMAP = File.expand_path('../../config/importmap.rb', __dir__)
@@ -29,6 +29,15 @@ module Finesse
     # documents for engines.
     initializer 'finesse.importmap', before: 'importmap' do |app|
       app.config.importmap.paths << IMPORTMAP if app.config.respond_to?(:importmap)
+    end
+
+    rake_tasks do
+      namespace :finesse do
+        desc 'Print the hex signing key for FINESSE_SIGNING_KEY (for a Finesse process that runs without Rails)'
+        task signing_key: :environment do
+          puts Finesse.signing_key
+        end
+      end
     end
   end
 end
