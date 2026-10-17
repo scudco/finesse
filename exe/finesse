@@ -6,11 +6,9 @@ require_relative '../lib/finesse/platforms'
 
 args = ARGV.dup
 
-# If --db-path wasn't explicitly provided, try to resolve it from config/database.yml
-unless args.any? { |a| a.start_with?('--db-path') }
-  db_path = Finesse::Platforms.cable_db_path
-  args.unshift('--db-path', db_path) if db_path
-end
+# If --db-path/--db-url wasn't explicitly provided, resolve from config/database.yml
+db_flag = args.any? { |a| a.start_with?('--db-path', '--db-url') }
+args.unshift(*Finesse::Platforms.cable_db_args) unless db_flag
 
 # Derive FINESSE_SIGNING_KEY via Rails if not already set.
 if ENV['FINESSE_SIGNING_KEY'].nil? || ENV['FINESSE_SIGNING_KEY'].empty?

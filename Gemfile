@@ -5,6 +5,7 @@ source 'https://rubygems.org'
 gemspec
 
 gem 'minitest', '~> 5.0'
+gem 'puma', require: false
 gem 'rake', '>= 13.0'
 gem 'rubocop', require: false
 gem 'rubocop-minitest', require: false

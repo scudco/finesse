@@ -17,6 +17,8 @@ The signing key flow is the most complex part: Rails encrypts `secret_key_base` 
 exe/finesse                    Ruby wrapper — resolves db path + signing key, execs Go binary
 lib/finesse.rb                 Finesse.signing_key — hex-encodes Turbo's verifier key
 lib/finesse/platforms.rb       Platform detection, binary path resolution, database.yml parsing
+lib/puma/plugin/finesse.rb     Puma plugin shim — makes `plugin :finesse` resolvable in puma.rb
+lib/finesse/puma_plugin.rb     Puma plugin logic — spawns/monitors/stops the Go binary from inside Puma
 ext/finesse/main.go            Server entrypoint — SQLite WAL setup, HTTP routing, graceful shutdown
 ext/finesse/config.go          CLI flag parsing, env var reading, input validation
 ext/finesse/handler.go         SSE handler, HMAC token verification, CORS, Turbo payload extraction
@@ -41,6 +43,7 @@ Always use `bundle exec` — Ruby tests spawn subprocesses that need the gem's l
 - `test/exe/finesse_test.rb` — exe wrapper integration tests (db-path injection, flag passthrough)
 - `test/lib/finesse_test.rb` — signing key derivation (stubs Turbo module)
 - `test/lib/finesse/platforms_test.rb` — platform detection, binary resolution, database.yml parsing
+- `test/lib/finesse/puma_plugin_test.rb` — plugin command/env assembly, origin parsing, skip-on-misconfiguration
 - `ext/finesse/handler_test.go` — token verification, payload extraction, SSE formatting, CORS
 - `ext/finesse/broadcaster_test.go` — subscriptions, catchup, fan-out, channel isolation, buffer limits
 - `ext/finesse/config_test.go` — required flag/env validation (subprocess exit-code tests)

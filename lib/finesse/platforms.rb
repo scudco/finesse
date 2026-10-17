@@ -48,6 +48,19 @@ module Finesse
         exe
       end
 
+      # CLI args locating the cable database: --db-url when a URL is
+      # configured, else --db-path from config/database.yml.
+      # Returns an empty array when neither resolves.
+      def cable_db_args
+        if respond_to?(:cable_db_url)
+          url = cable_db_url
+          return ['--db-url', url] unless url.nil? || url.empty?
+        end
+
+        path = cable_db_path
+        path ? ['--db-path', path] : []
+      end
+
       # Resolve the cable database path from config/database.yml.
       # Returns nil if the file doesn't exist or no cable DB is configured.
       def cable_db_path
