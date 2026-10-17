@@ -107,7 +107,9 @@ Finesse picks the backend from the cable database's `adapter` in `config/databas
    ```erb
    <%= finesse_stream_from @chat %>
    ```
-   It takes the same arguments as `turbo_stream_from`, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. It points the stream at `http://localhost:4000` by default. In production, set `config.finesse.url` or the `FINESSE_URL` env var to your public Finesse URL.
+   It takes the same arguments as `turbo_stream_from`, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. It renders a `<finesse-stream-source>` element pointed at `http://localhost:4000` by default. In production, set `config.finesse.url` or the `FINESSE_URL` env var to your public Finesse URL.
+
+   The generator also adds `import "finesse"` to `app/javascript/application.js`, which loads the element's JavaScript through importmap (the Rails 8 default). With jsbundling, copy `app/assets/javascripts/finesse.js` from the gem into your app and import it from your entrypoint.
 
 5. Start your app:
    ```sh
@@ -135,7 +137,7 @@ The wrapper derives the signing key with `rails runner` before starting the bina
 ## How It Works
 
 ```
-Browser <turbo-stream-source> ──GET /events?signed_stream=…──> Finesse (Go binary, :4000)
+Browser <finesse-stream-source> ──GET /events?signed_stream=…──> Finesse (Go binary, :4000)
                                                                      │
 Rails app ──broadcast_append_to──> SolidCable ──INSERT──> database ←──POLL─┘
 ```
@@ -152,6 +154,13 @@ Key design choices:
 - **Polling with NOTIFY wakeup** — SQLite polls every 10ms; PostgreSQL rides `LISTEN/NOTIFY` with a 1s polling safety net
 - **Per-channel fan-out** — each channel gets its own broadcaster with a ring buffer for reconnection catch-up, backed by the table
 - **Pure Go drivers** — `modernc.org/sqlite` and `jackc/pgx` (no CGO), enabling easy cross-compilation
+
+### Browser client
+
+`finesse_stream_from` renders `<finesse-stream-source src="…">`, a custom element that replaces `<turbo-stream-source>`. It applies each message with Turbo's `renderStreamMessage`, so streams behave as before. It adds two things.
+
+- **One connection per stream, not per tab.** For each `src`, the tabs race for a [Web Lock](https://developer.mozilla.org/en-US/docs/Web/API/Web_Locks_API). The winner opens the `EventSource` and relays every message to the other tabs over a `BroadcastChannel`. When it closes, another tab takes the lock and connects with `?last_event_id=` set to the last id it saw. Browsers without Web Locks or `BroadcastChannel` open one stream per element instead.
+- **Back/forward cache.** An open `EventSource` keeps a page out of the bfcache. The element closes it on `pagehide` and, when the page returns from the cache (`pageshow` with `persisted`), reconnects from the last id.
 
 ## CLI Options
 
@@ -185,7 +194,7 @@ Key design choices:
 | `GET /up` | Health check. Returns 200 with the Finesse version as the body |
 | `GET /events?signed_stream=<token>` | SSE stream for the given signed stream |
 
-The SSE endpoint supports the `Last-Event-ID` header and replays missed messages on reconnect. Stream tokens use the same `ActiveSupport::MessageVerifier` format as Turbo's signed streams. Both endpoints set an `X-Finesse-Version` header.
+The SSE endpoint supports the `Last-Event-ID` header and replays missed messages on reconnect. `EventSource` can't set that header on a new connection, so `GET /events?signed_stream=<token>&last_event_id=<id>` does the same; the header wins when both are present. Stream tokens use the same `ActiveSupport::MessageVerifier` format as Turbo's signed streams. Both endpoints set an `X-Finesse-Version` header.
 
 ## Development
 

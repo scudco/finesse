@@ -54,8 +54,14 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 	// latestID under the lock -- eliminates the data race from reading latestID
 	// outside the lock.
 	// Reconnection: browser sends Last-Event-ID; replay only missed events.
+	// A new EventSource cannot set headers, so the client may pass the same
+	// id as ?last_event_id=. The header wins when both are present.
 	lastID := int64(-1)
-	if raw := r.Header.Get("Last-Event-ID"); raw != "" {
+	raw := r.Header.Get("Last-Event-ID")
+	if raw == "" {
+		raw = r.URL.Query().Get("last_event_id")
+	}
+	if raw != "" {
 		if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			lastID = id
 		}

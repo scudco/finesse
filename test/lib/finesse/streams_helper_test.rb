@@ -27,11 +27,11 @@ class TestStreamsHelper < Minitest::Test
     Rails.application = @previous_app
   end
 
-  def test_renders_turbo_stream_source_pointing_at_finesse
+  def test_renders_finesse_stream_source_pointing_at_finesse
     html = @view.finesse_stream_from('chat')
 
-    assert_includes html, '<turbo-stream-source src="http://localhost:4000/events?signed_stream='
-    assert_includes html, '></turbo-stream-source>'
+    assert_includes html, '<finesse-stream-source src="http://localhost:4000/events?signed_stream='
+    assert_includes html, '></finesse-stream-source>'
   end
 
   def test_escapes_token_characters_in_the_query
