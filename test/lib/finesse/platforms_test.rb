@@ -67,6 +67,41 @@ class TestPlatforms < Minitest::Test
     end
   end
 
+  def test_cable_db_path_returns_nil_for_postgres
+    with_database_yml('development' => { 'cable' => pg_config }) do
+      assert_nil Finesse::Platforms.cable_db_path
+    end
+  end
+
+  def test_cable_db_url_builds_dsn_from_postgres_config
+    with_database_yml('development' => { 'cable' => pg_config }) do
+      assert_equal 'dbname=app_cable host=db.internal port=5433 user=app password=hunter2',
+                   Finesse::Platforms.cable_db_url
+    end
+  end
+
+  def test_cable_db_url_prefers_url_key
+    config = { 'adapter' => 'postgresql', 'url' => 'postgres://u@h/db', 'database' => 'ignored' }
+
+    with_database_yml('development' => { 'cable' => config }) do
+      assert_equal 'postgres://u@h/db', Finesse::Platforms.cable_db_url
+    end
+  end
+
+  def test_cable_db_url_quotes_values_with_spaces
+    config = { 'adapter' => 'postgresql', 'database' => 'app_cable', 'password' => "it's a pass" }
+
+    with_database_yml('development' => { 'cable' => config }) do
+      assert_equal "dbname=app_cable password='it\\'s a pass'", Finesse::Platforms.cable_db_url
+    end
+  end
+
+  def test_cable_db_url_returns_nil_for_sqlite
+    with_database_yml('development' => { 'cable' => { 'database' => 'storage/cable.sqlite3' } }) do
+      assert_nil Finesse::Platforms.cable_db_url
+    end
+  end
+
   private
 
   def with_root(dir)
@@ -109,6 +144,11 @@ class TestPlatforms < Minitest::Test
       File.write(File.join(config_dir, 'database.yml'), yaml_content)
       Dir.chdir(dir, &)
     end
+  end
+
+  def pg_config
+    { 'adapter' => 'postgresql', 'database' => 'app_cable', 'host' => 'db.internal',
+      'port' => 5433, 'username' => 'app', 'password' => 'hunter2' }
   end
 
   def with_env(vars)

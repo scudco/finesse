@@ -20,9 +20,10 @@ type message struct {
 type broadcaster struct {
 	db        *sql.DB
 	channel   []byte
-	tableName string
+	pollQuery string
 	stopCh    chan struct{}
 	doneCh    chan struct{}
+	wakeCh    chan struct{} // notify-driven poll wakeup (postgres)
 
 	mu       sync.Mutex
 	clients  map[chan []message]struct{}
@@ -32,15 +33,18 @@ type broadcaster struct {
 
 func newBroadcaster(db *sql.DB, channel string, cfg Config) *broadcaster {
 	b := &broadcaster{
-		db:        db,
-		channel:   []byte(channel),
-		tableName: cfg.TableName,
-		clients:   make(map[chan []message]struct{}),
-		stopCh:    make(chan struct{}),
-		doneCh:    make(chan struct{}),
+		db:      db,
+		channel: []byte(channel),
+		pollQuery: bind(fmt.Sprintf(
+			`SELECT id, payload FROM %s WHERE channel = ? AND id > ? ORDER BY id ASC`,
+			cfg.TableName), cfg.Postgres()),
+		stopCh:  make(chan struct{}),
+		doneCh:  make(chan struct{}),
+		wakeCh:  make(chan struct{}, 1),
+		clients: make(map[chan []message]struct{}),
 	}
 	// Seed latestID so fresh connections don't replay history.
-	query := fmt.Sprintf("SELECT COALESCE(MAX(id), 0) FROM %s WHERE channel = ?", b.tableName)
+	query := bind(fmt.Sprintf("SELECT COALESCE(MAX(id), 0) FROM %s WHERE channel = ?", cfg.TableName), cfg.Postgres())
 	db.QueryRow(query, b.channel).Scan(&b.latestID)
 	go b.run(cfg)
 	return b
@@ -56,16 +60,23 @@ func (b *broadcaster) run(cfg Config) {
 			return
 		case <-ticker.C:
 			b.poll()
+		case <-b.wakeCh:
+			b.poll()
 		}
 	}
 }
 
+// wake triggers an immediate poll. Non-blocking: a pending wakeup already
+// guarantees a poll that will see the new rows.
+func (b *broadcaster) wake() {
+	select {
+	case b.wakeCh <- struct{}{}:
+	default:
+	}
+}
+
 func (b *broadcaster) poll() {
-	query := fmt.Sprintf(
-		`SELECT id, payload FROM %s WHERE channel = ? AND id > ? ORDER BY id ASC`,
-		b.tableName,
-	)
-	rows, err := b.db.Query(query, b.channel, b.latestID)
+	rows, err := b.db.Query(b.pollQuery, b.channel, b.latestID)
 	if err != nil {
 		log.Printf("broadcaster query error: %v", err)
 		return
@@ -157,6 +168,17 @@ func newBroadcasterRegistry(db *sql.DB, cfg Config) *broadcasterRegistry {
 		broadcasters: make(map[string]*broadcaster),
 		db:           db,
 		cfg:          cfg,
+	}
+}
+
+// wake pokes a channel's broadcaster after a pg_notify. No-op when nobody is
+// subscribed: the broadcaster seeds from MAX(id) on first subscribe anyway.
+func (r *broadcasterRegistry) wake(channel string) {
+	r.mu.Lock()
+	b := r.broadcasters[channel]
+	r.mu.Unlock()
+	if b != nil {
+		b.wake()
 	}
 }
 

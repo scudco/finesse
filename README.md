@@ -4,7 +4,7 @@
 
 # Finesse
 
-Finesse replaces ActionCable's WebSocket transport with a lightweight Go binary that polls SolidCable's SQLite table and streams Turbo updates to browsers via Server-Sent Events (SSE). No WebSocket infrastructure needed — just a single binary alongside your Rails app.
+Finesse replaces ActionCable's WebSocket transport with a lightweight Go binary that watches SolidCable's database (SQLite or PostgreSQL) and streams Turbo updates to browsers via Server-Sent Events (SSE). No WebSocket infrastructure needed — just a single binary alongside your Rails app.
 
 In a fan-out benchmark against ActionCable on Puma, Finesse halved delivery latency at everyday load and kept delivering every message at a load that saturated Puma ([numbers below](#why-finesse)).
 
@@ -65,7 +65,7 @@ Browser ⇄ WS upgrade ⇄ Puma               Browser ──GET /events──> G
   gone                                      EventSource (Last-Event-ID)
 ```
 
-The server's whole job is to poll one SQLite table and write text frames to every connection holding a valid signed token. You can watch a live stream with `curl`.
+The server's whole job is to watch one database table and write text frames to every connection holding a valid signed token. You can watch a live stream with `curl`.
 
 ### The tradeoff: deployment
 
@@ -73,12 +73,12 @@ ActionCable costs nothing to deploy because it already lives inside Puma. Finess
 
 ## Prerequisites
 
-Finesse currently supports **SolidCable with SQLite** only. Your Rails app needs:
+Finesse supports **SolidCable on SQLite or PostgreSQL (14+)**. Your Rails app needs:
 
 - **[SolidCable](https://github.com/rails/solid_cable)** as your ActionCable adapter, with a `cable:` database configured in `config/database.yml`
 - **[turbo-rails](https://github.com/hotwired/turbo-rails)** (>= 2.0) — Finesse uses Turbo's signed stream tokens for authentication
 
-PostgreSQL and other adapters are on the [roadmap](#roadmap).
+The wrapper picks the backend from the cable database's `adapter` in `config/database.yml`: SQLite configs pass `--db-path` to the binary, PostgreSQL configs pass `--db-url`.
 
 ## Quick Start
 
@@ -111,15 +111,17 @@ PostgreSQL and other adapters are on the [roadmap](#roadmap).
 ```
 Browser <turbo-stream-source> ──GET /events?signed_stream=…──> Finesse (Go binary, :4000)
                                                                      │
-Rails app ──broadcast_append_to──> SolidCable ──INSERT──> SQLite ←──POLL─┘
+Rails app ──broadcast_append_to──> SolidCable ──INSERT──> database ←──POLL─┘
 ```
 
-Finesse polls the `solid_cable_messages` table for new rows and streams them as SSE events to connected browsers. It uses SQLite WAL mode for concurrent read access alongside Rails writes.
+Finesse watches the `solid_cable_messages` table for new rows and streams them as SSE events to connected browsers. On SQLite it polls every 10ms and uses WAL mode for concurrent reads alongside Rails writes.
+
+On PostgreSQL (`--db-url`), Finesse installs an `AFTER INSERT` trigger at boot that `pg_notify`s each new row's channel name. The matching broadcaster wakes and fetches rows at once, so delivery is near-instant; the poll ticker (default 1s) only backstops notifications missed while reconnecting. The NOTIFY payload carries only the channel name, never the message, so the 8KB NOTIFY limit does not apply. Requires PostgreSQL 14+ (`CREATE OR REPLACE TRIGGER`); if the database user cannot create triggers, Finesse logs a warning and falls back to pure polling.
 
 Key design choices:
-- **Polling over triggers** — simple, no SQLite extensions required, 10ms default interval
+- **Polling with NOTIFY wakeup** — SQLite polls every 10ms; PostgreSQL rides `LISTEN/NOTIFY` with a 1s polling safety net
 - **Per-channel fan-out** — each channel gets its own broadcaster with a ring buffer for reconnection catch-up
-- **Pure Go SQLite** — uses `modernc.org/sqlite` (no CGO), enabling easy cross-compilation
+- **Pure Go drivers** — `modernc.org/sqlite` and `jackc/pgx` (no CGO), enabling easy cross-compilation
 
 ## CLI Options
 
@@ -127,8 +129,9 @@ Key design choices:
 |------|---------|-------------|
 | `--port` | `4000` | HTTP listen port |
 | `--db-path` | auto from `config/database.yml` | Path to SolidCable SQLite database |
+| `--db-url` | auto from `config/database.yml` | PostgreSQL connection URL or DSN (selects the PostgreSQL backend) |
 | `--table-name` | `solid_cable_messages` | SolidCable messages table name |
-| `--poll-interval` | `10` | Database poll interval (integer, milliseconds) |
+| `--poll-interval` | `10` SQLite / `1000` PostgreSQL | Database poll interval (integer, milliseconds) |
 | `--allow-origin` | *(required)* | `Access-Control-Allow-Origin` header value |
 
 ## Environment Variables
@@ -272,7 +275,6 @@ Set `FINESSE_SIGNING_KEY` as a hex-encoded env var in production to avoid a `rai
 
 - **Rails generator** — `rails g finesse:install` for config, initializer, and binstub
 - **Engine/Railtie** — view helpers (`finesse_sse_url`)
-- **PostgreSQL support** — `LISTEN/NOTIFY` adapter as alternative to SQLite polling. 8KB limit may not be worth it, but polling in PostgreSQL would still be on the roadmap.
 
 ## License
 

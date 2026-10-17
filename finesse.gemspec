@@ -8,8 +8,8 @@ Gem::Specification.new do |spec|
   spec.authors     = ['scudco']
   spec.summary     = 'SSE server for ActionCable in Rails'
   spec.description = "Finesse replaces ActionCable's default WebSocket transport with a lightweight " \
-                     "Go binary that polls SolidCable's SQLite table and streams Turbo updates to " \
-                     'browsers via Server-Sent Events.'
+                     'Go binary that watches SolidCable messages (SQLite or PostgreSQL) and streams ' \
+                     'Turbo updates to browsers via Server-Sent Events.'
   spec.homepage    = 'https://github.com/scudco/finesse'
   spec.license     = 'MIT'
 

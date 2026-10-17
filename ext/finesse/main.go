@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -10,29 +9,32 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 func main() {
 	cfg := ParseConfig()
 
-	db, err := sql.Open("sqlite", cfg.DBPath)
+	db, err := openDB(cfg)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
 	defer db.Close()
-
-	// WAL mode lets the Go server read while Rails writes concurrently.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;"); err != nil {
-		log.Printf("pragma: %v", err)
-	}
 
 	registry := newBroadcasterRegistry(db, cfg)
 
 	// Shared context cancelled on shutdown to close all SSE connections.
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	defer shutdownCancel()
+
+	// Postgres: a trigger NOTIFYs each insert's channel so broadcasters poll
+	// immediately instead of waiting out the slower poll interval.
+	if cfg.Postgres() {
+		if err := setupNotify(shutdownCtx, cfg); err != nil {
+			log.Printf("pg_notify setup failed: %v; relying on polling every %s", err, cfg.PollInterval)
+		} else {
+			go listenNotify(shutdownCtx, cfg, registry)
+		}
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/up", func(w http.ResponseWriter, r *http.Request) {
