@@ -402,3 +402,168 @@ func TestBroadcasterRegistry_WakeRoutesToChannel(t *testing.T) {
 		t.Fatal("registry wake did not reach the broadcaster")
 	}
 }
+
+// setupFileDB is setupTestDB on a WAL file, for tests that read and write
+// from several goroutines (separate :memory: connections are separate databases).
+func setupFileDB(t *testing.T) *sql.DB {
+	t.Helper()
+	dsn := "file:" + t.TempDir() + "/cable.db?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE solid_cable_messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		channel TEXT NOT NULL,
+		payload TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db
+}
+
+func TestBroadcasterRegistry_ReconnectAfterReapReplaysFromTable(t *testing.T) {
+	db := setupFileDB(t)
+	cfg := testConfig()
+
+	r := newBroadcasterRegistry(db, cfg)
+	defer r.stopAll()
+
+	ch1, _ := r.subscribe("chat", -1)
+	seen := insertMessage(t, db, "chat", "<div>seen</div>")
+	select {
+	case <-ch1:
+	case <-time.After(time.Second):
+		t.Fatal("no live delivery")
+	}
+	r.unsubscribe("chat", ch1) // last client leaves, broadcaster is reaped
+
+	insertMessage(t, db, "chat", "<div>missed-1</div>")
+	insertMessage(t, db, "chat", "<div>missed-2</div>")
+	insertMessage(t, db, "other", "<div>elsewhere</div>")
+
+	ch2, catchup := r.subscribe("chat", seen)
+	defer r.unsubscribe("chat", ch2)
+
+	if len(catchup) != 2 || catchup[0].html != "<div>missed-1</div>" || catchup[1].html != "<div>missed-2</div>" {
+		t.Fatalf("expected the 2 missed messages from the table, got %+v", catchup)
+	}
+}
+
+func TestBroadcaster_LastIDOlderThanBufferReplaysFromTable(t *testing.T) {
+	db := setupFileDB(t)
+	cfg := testConfig()
+
+	b := newBroadcaster(db, "chat", cfg)
+	defer b.stop()
+
+	first := insertMessage(t, db, "chat", "<div>msg-0</div>")
+	total := bufferSize + 50
+	for i := 1; i < total; i++ {
+		insertMessage(t, db, "chat", fmt.Sprintf("<div>msg-%d</div>", i))
+	}
+	waitFor(t, func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.latestID == first+int64(total-1)
+	})
+
+	ch, catchup := b.subscribe(first)
+	defer b.unsubscribe(ch)
+
+	if len(catchup) != total-1 {
+		t.Fatalf("expected %d messages, got %d", total-1, len(catchup))
+	}
+	for i, m := range catchup {
+		if want := first + int64(i) + 1; m.id != want {
+			t.Fatalf("catchup[%d].id = %d, want %d", i, m.id, want)
+		}
+	}
+}
+
+func TestBroadcaster_ReplayKeepsNewestWhenOverLimit(t *testing.T) {
+	db := setupTestDB(t)
+	cfg := testConfig()
+
+	for i := 0; i < replayLimit+100; i++ {
+		insertMessage(t, db, "chat", fmt.Sprintf("<div>msg-%d</div>", i))
+	}
+	b := newBroadcaster(db, "chat", cfg)
+	defer b.stop()
+
+	ch, catchup := b.subscribe(0)
+	defer b.unsubscribe(ch)
+
+	if len(catchup) != replayLimit {
+		t.Fatalf("expected %d messages, got %d", replayLimit, len(catchup))
+	}
+	if catchup[0].html != "<div>msg-100</div>" || catchup[len(catchup)-1].html != fmt.Sprintf("<div>msg-%d</div>", replayLimit+99) {
+		t.Fatalf("expected the newest rows, got %q .. %q", catchup[0].html, catchup[len(catchup)-1].html)
+	}
+}
+
+// A reconnect while rows are still being inserted must see every row after
+// lastID exactly once, whether it arrives as catch-up or live.
+func TestBroadcaster_ReplayLiveBoundaryNoGapNoDuplicate(t *testing.T) {
+	db := setupFileDB(t)
+	cfg := testConfig()
+	const preload, total = bufferSize + 100, 2*bufferSize + 200
+
+	first := insertMessage(t, db, "chat", "<div>msg-0</div>")
+	b := newBroadcaster(db, "chat", cfg)
+	defer b.stop()
+	for i := 1; i < preload; i++ {
+		insertMessage(t, db, "chat", fmt.Sprintf("<div>msg-%d</div>", i))
+	}
+	// The buffer has rolled over: replaying from first needs the table.
+	waitFor(t, func() bool {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		return b.floor > first
+	})
+
+	go func() {
+		for i := preload; i < total; i++ {
+			payload, _ := json.Marshal(fmt.Sprintf("<div>msg-%d</div>", i))
+			db.Exec("INSERT INTO solid_cable_messages (channel, payload) VALUES (?, ?)", []byte("chat"), payload)
+			if i%20 == 0 {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}()
+	time.Sleep(5 * time.Millisecond) // subscribe mid-stream
+
+	ch, catchup := b.subscribe(first)
+	defer b.unsubscribe(ch)
+
+	got := catchup
+	last := first + int64(total-1)
+	for len(got) == 0 || got[len(got)-1].id < last {
+		select {
+		case msgs := <-ch:
+			got = append(got, msgs...)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out at %d of %d messages", len(got), total-1)
+		}
+	}
+	if len(got) != total-1 {
+		t.Fatalf("expected %d messages, got %d", total-1, len(got))
+	}
+	for i, m := range got {
+		if want := first + int64(i) + 1; m.id != want {
+			t.Fatalf("message %d has id %d, want %d (gap or duplicate)", i, m.id, want)
+		}
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatal("condition not met in time")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}

@@ -54,8 +54,14 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 	// latestID under the lock -- eliminates the data race from reading latestID
 	// outside the lock.
 	// Reconnection: browser sends Last-Event-ID; replay only missed events.
+	// A new EventSource cannot set headers, so the client may pass the same
+	// id as ?last_event_id=. The header wins when both are present.
 	lastID := int64(-1)
-	if raw := r.Header.Get("Last-Event-ID"); raw != "" {
+	raw := r.Header.Get("Last-Event-ID")
+	if raw == "" {
+		raw = r.URL.Query().Get("last_event_id")
+	}
+	if raw != "" {
 		if id, err := strconv.ParseInt(raw, 10, 64); err == nil {
 			lastID = id
 		}
@@ -76,7 +82,7 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 
 	// Send any messages missed since lastID before streaming live.
 	for _, m := range catchup {
-		writeSSEEvent(w, m.id, m.html)
+		writeSSEEvent(w, m)
 	}
 	flusher.Flush()
 
@@ -109,7 +115,7 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 			return
 		case msgs := <-ch:
 			for _, m := range msgs {
-				writeSSEEvent(w, m.id, m.html)
+				writeSSEEvent(w, m)
 			}
 			flusher.Flush()
 		}
@@ -201,10 +207,15 @@ func extractTurboHTML(payload []byte) (string, error) {
 }
 
 // writeSSEEvent writes one SSE event. Multi-line data is handled per spec:
-// each newline becomes a new "data:" line.
-func writeSSEEvent(w http.ResponseWriter, id int64, data string) {
-	fmt.Fprintf(w, "id: %d\n", id)
-	for _, line := range strings.Split(data, "\n") {
+// each newline becomes a new "data:" line. A late message (committed after a
+// higher id was sent) goes out without an id: per the spec an event with no id
+// field leaves the client's last event ID alone, so it stays at the highest id
+// and a reconnect does not replay rows the client already has.
+func writeSSEEvent(w http.ResponseWriter, m message) {
+	if !m.late {
+		fmt.Fprintf(w, "id: %d\n", m.id)
+	}
+	for _, line := range strings.Split(m.html, "\n") {
 		fmt.Fprintf(w, "data: %s\n", line)
 	}
 	fmt.Fprintln(w) // blank line terminates the event

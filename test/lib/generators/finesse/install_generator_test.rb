@@ -60,7 +60,40 @@ class TestInstallGenerator < Rails::Generators::TestCase
     assert_file 'config/initializers/finesse.rb', /FINESSE_ALLOW_ORIGIN/
   end
 
+  def test_appends_javascript_import
+    write_js "import 'controllers'"
+    run_generator
+
+    assert_file 'app/javascript/application.js', /\Aimport 'controllers'\nimport "finesse"\n\z/
+  end
+
+  def test_running_twice_adds_the_javascript_import_once
+    write_js "import 'controllers'\n"
+    2.times { run_generator }
+
+    assert_equal 1, File.read(File.join(destination_root, 'app/javascript/application.js')).scan('"finesse"').size
+  end
+
+  def test_skips_javascript_import_when_already_present
+    write_js "import 'finesse'\n"
+    run_generator
+
+    assert_file 'app/javascript/application.js', "import 'finesse'\n"
+  end
+
+  def test_warns_and_continues_without_javascript_entrypoint
+    output = run_generator
+
+    assert_match(%r{app/javascript/application.js not found}, output)
+    assert_no_file 'app/javascript/application.js'
+  end
+
   private
+
+  def write_js(content)
+    FileUtils.mkdir_p(File.join(destination_root, 'app/javascript'))
+    File.write(File.join(destination_root, 'app/javascript/application.js'), content)
+  end
 
   def write_puma(content)
     FileUtils.mkdir_p(File.join(destination_root, 'config'))
