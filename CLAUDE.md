@@ -27,8 +27,8 @@ lib/finesse/puma_plugin.rb     Puma plugin logic — spawns/monitors/stops the G
 ext/finesse/main.go            Server entrypoint — HTTP routing, version, Postgres NOTIFY listener startup, drain-then-stop shutdown
 ext/finesse/config.go          CLI flag parsing, env var reading (signing keys), input validation
 ext/finesse/store.go           Backend open (SQLite WAL / pgx), ?→$n binding, pg_notify trigger install + LISTEN loop
-ext/finesse/handler.go         SSE handler (retry, heartbeats), multi-key HMAC token verification, CORS, Turbo payload extraction
-ext/finesse/broadcaster.go     Per-channel polling + notify wakeup, ring buffer (200 msgs), client fan-out
+ext/finesse/handler.go         SSE handler (retry, heartbeats, id-less late rows), multi-key HMAC token verification, CORS, Turbo payload extraction
+ext/finesse/broadcaster.go     Per-channel polling + notify wakeup, ring buffer (200 msgs) with table replay, PostgreSQL commit-order gap tracking, client fan-out
 ```
 
 ## Commands
@@ -55,10 +55,10 @@ Always use `bundle exec` — Ruby tests spawn subprocesses that need the gem's l
 - `test/lib/finesse/puma_plugin_test.rb` — plugin command/env assembly, origin parsing, skip-on-misconfiguration
 - `ext/finesse/handler_test.go` — token verification (multi-key), payload extraction, SSE formatting, CORS, retry/heartbeat/version
 - `ext/finesse/main_test.go` — drain: stream stays open, closes with 200/EOF, listener refused, second signal aborts
-- `ext/finesse/broadcaster_test.go` — subscriptions, catchup, fan-out, channel isolation, buffer limits, notify wakeup
+- `ext/finesse/broadcaster_test.go` — subscriptions, catchup, fan-out, channel isolation, buffer limits, replay from the table, notify wakeup
 - `ext/finesse/config_test.go` — required flag/env validation, signing key parsing (subprocess exit-code tests)
 - `ext/finesse/store_test.go` — `?`→`$n` placeholder binding
-- `ext/finesse/postgres_test.go` — end-to-end LISTEN/NOTIFY against a real PG (skipped unless `FINESSE_TEST_PG_URL` is set)
+- `ext/finesse/postgres_test.go` — end-to-end LISTEN/NOTIFY and out-of-order commit delivery against a real PG (skipped unless `FINESSE_TEST_PG_URL` is set)
 
 ## Token Format
 

@@ -146,9 +146,13 @@ Finesse watches the `solid_cable_messages` table for new rows and streams them a
 
 On PostgreSQL (`--db-url`), Finesse installs an `AFTER INSERT` trigger at boot that `pg_notify`s each new row's channel name. The matching broadcaster wakes and fetches rows at once, so delivery is near-instant; the poll ticker (default 1s) only backstops notifications missed while reconnecting. The NOTIFY payload carries only the channel name, never the message, so the 8KB NOTIFY limit does not apply. Requires PostgreSQL 14+ (`CREATE OR REPLACE TRIGGER`); if the database user cannot create triggers, Finesse logs a warning and falls back to pure polling.
 
+Reconnecting clients send `Last-Event-ID` and get every message they missed. Recent ones come from a 200-message memory buffer per channel. Anything older, including after the last client left, after a restart, or after a long disconnect, is read back from the table (the newest 1000 rows, within SolidCable's `message_retention`).
+
+On PostgreSQL, ids come from a sequence at insert but rows appear at commit, so a row can commit after a higher id was already delivered. Finesse notes ids below the newest one that are missing from the whole table and re-queries them for 10 seconds. A late row arrives as soon as it commits, sent without an `id:` line so the client's `Last-Event-ID` stays at the highest id and a reconnect does not replay it. Ids that never show up are rolled-back inserts and expire. A transaction held open longer than that can still be missed. SQLite has one writer and needs none of this.
+
 Key design choices:
 - **Polling with NOTIFY wakeup** — SQLite polls every 10ms; PostgreSQL rides `LISTEN/NOTIFY` with a 1s polling safety net
-- **Per-channel fan-out** — each channel gets its own broadcaster with a ring buffer for reconnection catch-up
+- **Per-channel fan-out** — each channel gets its own broadcaster with a ring buffer for reconnection catch-up, backed by the table
 - **Pure Go drivers** — `modernc.org/sqlite` and `jackc/pgx` (no CGO), enabling easy cross-compilation
 
 ### Browser client
@@ -190,7 +194,7 @@ Key design choices:
 | `GET /up` | Health check. Returns 200 with the Finesse version as the body |
 | `GET /events?signed_stream=<token>` | SSE stream for the given signed stream |
 
-The SSE endpoint supports the `Last-Event-ID` header for automatic reconnection catch-up. `EventSource` can't set that header on a new connection, so `GET /events?signed_stream=<token>&last_event_id=<id>` does the same; the header wins when both are present. Stream tokens use the same `ActiveSupport::MessageVerifier` format as Turbo's signed streams. Both endpoints set an `X-Finesse-Version` header.
+The SSE endpoint supports the `Last-Event-ID` header and replays missed messages on reconnect. `EventSource` can't set that header on a new connection, so `GET /events?signed_stream=<token>&last_event_id=<id>` does the same; the header wins when both are present. Stream tokens use the same `ActiveSupport::MessageVerifier` format as Turbo's signed streams. Both endpoints set an `X-Finesse-Version` header.
 
 ## Development
 

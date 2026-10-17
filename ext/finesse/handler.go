@@ -82,7 +82,7 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 
 	// Send any messages missed since lastID before streaming live.
 	for _, m := range catchup {
-		writeSSEEvent(w, m.id, m.html)
+		writeSSEEvent(w, m)
 	}
 	flusher.Flush()
 
@@ -115,7 +115,7 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 			return
 		case msgs := <-ch:
 			for _, m := range msgs {
-				writeSSEEvent(w, m.id, m.html)
+				writeSSEEvent(w, m)
 			}
 			flusher.Flush()
 		}
@@ -207,10 +207,15 @@ func extractTurboHTML(payload []byte) (string, error) {
 }
 
 // writeSSEEvent writes one SSE event. Multi-line data is handled per spec:
-// each newline becomes a new "data:" line.
-func writeSSEEvent(w http.ResponseWriter, id int64, data string) {
-	fmt.Fprintf(w, "id: %d\n", id)
-	for _, line := range strings.Split(data, "\n") {
+// each newline becomes a new "data:" line. A late message (committed after a
+// higher id was sent) goes out without an id: per the spec an event with no id
+// field leaves the client's last event ID alone, so it stays at the highest id
+// and a reconnect does not replay rows the client already has.
+func writeSSEEvent(w http.ResponseWriter, m message) {
+	if !m.late {
+		fmt.Fprintf(w, "id: %d\n", m.id)
+	}
+	for _, line := range strings.Split(m.html, "\n") {
 		fmt.Fprintf(w, "data: %s\n", line)
 	}
 	fmt.Fprintln(w) // blank line terminates the event

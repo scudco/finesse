@@ -129,7 +129,7 @@ func TestExtractTurboHTML_InvalidJSON(t *testing.T) {
 func TestWriteSSEEvent(t *testing.T) {
 	var buf bytes.Buffer
 	w := httptest.NewRecorder()
-	writeSSEEvent(w, 42, "<div>hello</div>")
+	writeSSEEvent(w, message{id: 42, html: "<div>hello</div>"})
 	buf.Write(w.Body.Bytes())
 
 	expected := "id: 42\ndata: <div>hello</div>\n\n"
@@ -138,9 +138,19 @@ func TestWriteSSEEvent(t *testing.T) {
 	}
 }
 
+func TestWriteSSEEvent_LateMessageHasNoID(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeSSEEvent(w, message{id: 5, html: "<div>late</div>", late: true})
+
+	expected := "data: <div>late</div>\n\n"
+	if w.Body.String() != expected {
+		t.Fatalf("expected %q, got %q", expected, w.Body.String())
+	}
+}
+
 func TestWriteSSEEvent_Multiline(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeSSEEvent(w, 1, "line1\nline2\nline3")
+	writeSSEEvent(w, message{id: 1, html: "line1\nline2\nline3"})
 
 	expected := "id: 1\ndata: line1\ndata: line2\ndata: line3\n\n"
 	if w.Body.String() != expected {
