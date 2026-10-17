@@ -7,8 +7,9 @@ module Finesse
     # rails g finesse:install
     class InstallGenerator < Rails::Generators::Base
       PUMA_PLUGIN = /^[^#\n]*plugin\s+:finesse\b/
+      JS_IMPORT = /^\s*import\s+['"]finesse['"]/
 
-      desc 'Adds the Finesse Puma plugin and an initializer.'
+      desc 'Adds the Finesse Puma plugin, the JavaScript import, and an initializer.'
 
       def add_puma_plugin
         path = 'config/puma.rb'
@@ -18,6 +19,18 @@ module Finesse
           say_status :skip, "#{path} already has plugin :finesse", :yellow
         else
           append_to_file path, "\nplugin :finesse\n"
+        end
+      end
+
+      def add_javascript_import
+        path = 'app/javascript/application.js'
+        file = File.join(destination_root, path)
+        if !File.exist?(file)
+          say_status :warn, "#{path} not found; add `import \"finesse\"` to your JavaScript entrypoint", :yellow
+        elsif File.read(file).match?(JS_IMPORT)
+          say_status :skip, "#{path} already imports finesse", :yellow
+        else
+          append_to_file path, "#{"\n" unless File.read(file).end_with?("\n")}import \"finesse\"\n"
         end
       end
 

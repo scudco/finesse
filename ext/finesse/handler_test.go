@@ -269,3 +269,58 @@ func TestSSEHandler_NoHeartbeatWhenDisabled(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 }
+
+func TestSSEHandler_ResumeFromLastEventIDQueryParam(t *testing.T) {
+	cfg := Config{
+		SigningKeys:  [][]byte{testKey},
+		AllowOrigins: []string{"*"},
+		TableName:    "solid_cable_messages",
+		PollInterval: 5 * time.Millisecond,
+	}
+	db := setupTestDB(t)
+	db.SetMaxOpenConns(1) // each :memory: connection is its own database
+	registry := newBroadcasterRegistry(db, cfg)
+	t.Cleanup(registry.stopAll)
+	shutdown, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sseHandler(w, r, registry, shutdown, cfg)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(cancel) // runs first: end the streams so srv.Close does not block
+
+	url := srv.URL + "/events?signed_stream=" + signStream("chat", testKey)
+	client := &http.Client{Timeout: 2 * time.Second}
+	open := func(query, header string) *bufio.Reader {
+		req, _ := http.NewRequest("GET", url+query, nil)
+		if header != "" {
+			req.Header.Set("Last-Event-ID", header)
+		}
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return bufio.NewReader(resp.Body)
+	}
+
+	// The first client keeps the broadcaster, and its replay buffer, alive.
+	open("", "")
+	id1 := insertMessage(t, db, "chat", "<div>first</div>")
+	id2 := insertMessage(t, db, "chat", "<div>second</div>")
+	time.Sleep(50 * time.Millisecond)
+
+	wantFirstLine := func(r *bufio.Reader, want string) {
+		t.Helper()
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if line != want {
+			t.Fatalf("first line = %q, want %q", line, want)
+		}
+	}
+
+	wantFirstLine(open(fmt.Sprintf("&last_event_id=%d", id1), ""), fmt.Sprintf("id: %d\n", id2))
+	// Header wins: the query id is already current, the header is one behind.
+	wantFirstLine(open(fmt.Sprintf("&last_event_id=%d", id2), fmt.Sprint(id1)), fmt.Sprintf("id: %d\n", id2))
+}
