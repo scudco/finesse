@@ -34,6 +34,7 @@ const (
 type message struct {
 	id   int64
 	html string
+	late bool // committed after a higher id was already delivered (postgres)
 }
 
 // broadcaster runs a single poll loop and fans out to all connected clients.
@@ -136,6 +137,9 @@ func (b *broadcaster) poll() {
 	}
 
 	b.mu.Lock()
+	for i := range msgs {
+		msgs[i].late = msgs[i].id <= b.latestID
+	}
 	b.buffer = append(b.buffer, msgs...)
 	if drop := len(b.buffer) - bufferSize; drop > 0 {
 		for _, m := range b.buffer[:drop] {
@@ -184,7 +188,7 @@ func scanMessages(rows *sql.Rows) (msgs []message, present map[int64]bool) {
 			log.Printf("payload parse error (id=%d): %v", id, err)
 			continue
 		}
-		msgs = append(msgs, message{id, html})
+		msgs = append(msgs, message{id: id, html: html})
 	}
 	return msgs, present
 }
@@ -234,6 +238,9 @@ func (b *broadcaster) subscribe(lastID int64) (chan []message, []message) {
 	}
 	for _, m := range b.buffer {
 		if m.id > lastID && m.id > b.floor {
+			// This client is behind the row's id, so it never saw a higher
+			// one: send it with an id like any other catch-up row.
+			m.late = false
 			catchup = append(catchup, m)
 		}
 	}

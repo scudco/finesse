@@ -11,8 +11,12 @@ import (
 	"time"
 )
 
+// version is set at build time: -ldflags "-X main.version=1.2.3".
+var version = "dev"
+
 func main() {
 	cfg := ParseConfig()
+	log.Printf("Finesse %s", version)
 
 	db, err := openDB(cfg)
 	if err != nil {
@@ -22,7 +26,8 @@ func main() {
 
 	registry := newBroadcasterRegistry(db, cfg)
 
-	// Shared context cancelled on shutdown to close all SSE connections.
+	// Shared context cancelled once the drain window ends to close all SSE
+	// connections. Broadcasters and the NOTIFY listener keep running until then.
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	defer shutdownCancel()
 
@@ -41,7 +46,8 @@ func main() {
 		if origin := matchOrigin(r.Header.Get("Origin"), cfg.AllowOrigins); origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 		}
-		w.WriteHeader(http.StatusOK)
+		w.Header().Set("X-Finesse-Version", version)
+		fmt.Fprint(w, version)
 	})
 	mux.HandleFunc("/events", func(w http.ResponseWriter, r *http.Request) {
 		sseHandler(w, r, registry, shutdownCtx, cfg)
@@ -52,10 +58,6 @@ func main() {
 		Addr:    addr,
 		Handler: mux,
 	}
-	// When Shutdown is called, cancel the shared context so all SSE
-	// handlers return immediately — no need to wait for the timeout.
-	srv.RegisterOnShutdown(shutdownCancel)
-
 	// Graceful shutdown on SIGINT/SIGTERM.
 	done := make(chan os.Signal, 1)
 	signal.Notify(done, os.Interrupt, syscall.SIGTERM)
@@ -68,15 +70,51 @@ func main() {
 	}()
 
 	<-done
-	log.Println("shutting down...")
+	log.Printf("shutting down: draining streams for up to %s (signal again to exit now)", cfg.DrainTimeout)
 
-	registry.stopAll()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Printf("shutdown: %v", err)
+	if !drain(srv, shutdownCancel, cfg.DrainTimeout, done) {
+		log.Println("second signal, exiting now")
+		os.Exit(1)
 	}
 
+	// Streams are closed; now the broadcasters can stop.
+	registry.stopAll()
 	log.Println("stopped")
+}
+
+// drain stops accepting connections, then gives open SSE streams up to timeout
+// to finish on their own. After that it calls endStreams so the handlers return
+// and the connections close normally. Streams are never answered with 204/503:
+// per the HTML spec any non-200 response makes EventSource stop reconnecting
+// for good, whereas a plain close makes the browser reconnect after `retry`
+// and resume with Last-Event-ID.
+// https://html.spec.whatwg.org/multipage/server-sent-events.html
+// It returns false if a signal arrives on abort before draining finishes.
+func drain(srv *http.Server, endStreams func(), timeout time.Duration, abort <-chan os.Signal) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	finished := make(chan struct{})
+	go func() {
+		// Shutdown closes the listeners at once, then waits for streams.
+		srv.Shutdown(ctx)
+		close(finished)
+	}()
+
+	select {
+	case <-finished:
+		return true
+	case <-abort:
+		return false
+	case <-ctx.Done():
+	}
+
+	endStreams()
+	// Give the handlers a moment to return and flush their final bytes.
+	final, cancelFinal := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancelFinal()
+	if err := srv.Shutdown(final); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+	return true
 }

@@ -8,10 +8,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterRegistry, shutdown context.Context, cfg Config) {
@@ -20,13 +22,15 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 		w.Header().Set("Access-Control-Allow-Origin", origin)
 	}
 
+	w.Header().Set("X-Finesse-Version", version)
+
 	token := r.URL.Query().Get("signed_stream")
 	if token == "" {
 		http.Error(w, "signed_stream parameter required", http.StatusBadRequest)
 		return
 	}
 
-	channel, valid := verifySignedStream(token, cfg.SigningKey)
+	channel, valid := verifySignedStream(token, cfg.SigningKeys)
 	if !valid {
 		http.Error(w, "invalid signed stream", http.StatusForbidden)
 		return
@@ -62,22 +66,50 @@ func sseHandler(w http.ResponseWriter, r *http.Request, registry *broadcasterReg
 
 	log.Printf("client connected  channel=%.40s last_id=%d", channel, lastID)
 
+	// Tell EventSource how long to wait before reconnecting. The client uses
+	// this value as given, so after a restart every tab returns at the same
+	// moment. The server sends no per-client jitter; if reconnect storms
+	// matter, raise --retry (see docs/realtime-horizon.md).
+	if cfg.RetryMS > 0 {
+		fmt.Fprintf(w, "retry: %d\n\n", cfg.RetryMS)
+	}
+
 	// Send any messages missed since lastID before streaming live.
 	for _, m := range catchup {
-		writeSSEEvent(w, m.id, m.html)
+		writeSSEEvent(w, m)
 	}
 	flusher.Flush()
 
+	// A nil channel never fires, so Heartbeat == 0 disables pings.
+	var ping <-chan time.Time
+	if cfg.Heartbeat > 0 {
+		t := time.NewTicker(cfg.Heartbeat)
+		defer t.Stop()
+		ping = t.C
+	}
+
 	for {
 		select {
+		// Ending the stream with a normal close (not a 204/503) is deliberate:
+		// per the HTML spec, any non-200 response makes EventSource stop
+		// reconnecting for good. A plain close makes it reconnect after
+		// retry and resume with Last-Event-ID.
+		// https://html.spec.whatwg.org/multipage/server-sent-events.html
 		case <-shutdown.Done():
 			return
+		case <-ping:
+			// A comment line keeps proxies from idling the stream out, and the
+			// write fails fast once the client is gone.
+			if _, err := io.WriteString(w, ": ping\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
 		case <-r.Context().Done():
 			log.Printf("client disconnected channel=%.40s", channel)
 			return
 		case msgs := <-ch:
 			for _, m := range msgs {
-				writeSSEEvent(w, m.id, m.html)
+				writeSSEEvent(w, m)
 			}
 			flusher.Flush()
 		}
@@ -98,7 +130,8 @@ func matchOrigin(origin string, allowed []string) string {
 // format and returns the channel name.
 // Token format: base64strict(json(channel))--hex(hmac_sha256(base64_data, key))
 // The HMAC is computed over the base64 data string, matching Rails' MessageVerifier.
-func verifySignedStream(token string, key []byte) (string, bool) {
+// The token is valid if it verifies under any of keys.
+func verifySignedStream(token string, keys [][]byte) (string, bool) {
 	parts := strings.SplitN(token, "--", 2)
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
 		return "", false
@@ -112,9 +145,16 @@ func verifySignedStream(token string, key []byte) (string, bool) {
 	}
 
 	// MessageVerifier HMACs the base64-encoded data string, not the decoded bytes.
-	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(data))
-	if !hmac.Equal(sig, mac.Sum(nil)) {
+	verified := false
+	for _, key := range keys {
+		mac := hmac.New(sha256.New, key)
+		mac.Write([]byte(data))
+		if hmac.Equal(sig, mac.Sum(nil)) {
+			verified = true
+			break
+		}
+	}
+	if !verified {
 		return "", false
 	}
 
@@ -161,10 +201,15 @@ func extractTurboHTML(payload []byte) (string, error) {
 }
 
 // writeSSEEvent writes one SSE event. Multi-line data is handled per spec:
-// each newline becomes a new "data:" line.
-func writeSSEEvent(w http.ResponseWriter, id int64, data string) {
-	fmt.Fprintf(w, "id: %d\n", id)
-	for _, line := range strings.Split(data, "\n") {
+// each newline becomes a new "data:" line. A late message (committed after a
+// higher id was sent) goes out without an id: per the spec an event with no id
+// field leaves the client's last event ID alone, so it stays at the highest id
+// and a reconnect does not replay rows the client already has.
+func writeSSEEvent(w http.ResponseWriter, m message) {
+	if !m.late {
+		fmt.Fprintf(w, "id: %d\n", m.id)
+	}
+	for _, line := range strings.Split(m.html, "\n") {
 		fmt.Fprintf(w, "data: %s\n", line)
 	}
 	fmt.Fprintln(w) // blank line terminates the event

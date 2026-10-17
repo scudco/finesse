@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 // signStream produces a valid signed stream token for testing.
@@ -25,7 +28,7 @@ var testKey = []byte("test-secret-key-for-finesse")
 func TestVerifySignedStream(t *testing.T) {
 	token := signStream("chat", testKey)
 
-	channel, ok := verifySignedStream(token, testKey)
+	channel, ok := verifySignedStream(token, [][]byte{testKey})
 	if !ok {
 		t.Fatal("expected valid token")
 	}
@@ -36,7 +39,7 @@ func TestVerifySignedStream(t *testing.T) {
 
 func TestVerifySignedStream_WrongKey(t *testing.T) {
 	token := signStream("chat", testKey)
-	_, ok := verifySignedStream(token, []byte("wrong-key"))
+	_, ok := verifySignedStream(token, [][]byte{[]byte("wrong-key")})
 	if ok {
 		t.Fatal("expected invalid token with wrong key")
 	}
@@ -46,7 +49,7 @@ func TestVerifySignedStream_TamperedData(t *testing.T) {
 	token := signStream("chat", testKey)
 	// Replace first character of the base64 data.
 	tampered := "X" + token[1:]
-	_, ok := verifySignedStream(tampered, testKey)
+	_, ok := verifySignedStream(tampered, [][]byte{testKey})
 	if ok {
 		t.Fatal("expected invalid token with tampered data")
 	}
@@ -55,10 +58,24 @@ func TestVerifySignedStream_TamperedData(t *testing.T) {
 func TestVerifySignedStream_EmptyToken(t *testing.T) {
 	cases := []string{"", "--", "abc", "abc--", "--abc"}
 	for _, tc := range cases {
-		_, ok := verifySignedStream(tc, testKey)
+		_, ok := verifySignedStream(tc, [][]byte{testKey})
 		if ok {
 			t.Fatalf("expected invalid for token %q", tc)
 		}
+	}
+}
+
+func TestVerifySignedStream_MultipleKeys(t *testing.T) {
+	oldKey, newKey := []byte("old-key"), []byte("new-key")
+	keys := [][]byte{newKey, oldKey}
+
+	for _, signer := range [][]byte{oldKey, newKey} {
+		if channel, ok := verifySignedStream(signStream("chat", signer), keys); !ok || channel != "chat" {
+			t.Fatalf("token signed by %q should verify, got %q ok=%v", signer, channel, ok)
+		}
+	}
+	if _, ok := verifySignedStream(signStream("chat", []byte("retired-key")), keys); ok {
+		t.Fatal("token signed by an unknown key must fail")
 	}
 }
 
@@ -112,7 +129,7 @@ func TestExtractTurboHTML_InvalidJSON(t *testing.T) {
 func TestWriteSSEEvent(t *testing.T) {
 	var buf bytes.Buffer
 	w := httptest.NewRecorder()
-	writeSSEEvent(w, 42, "<div>hello</div>")
+	writeSSEEvent(w, message{id: 42, html: "<div>hello</div>"})
 	buf.Write(w.Body.Bytes())
 
 	expected := "id: 42\ndata: <div>hello</div>\n\n"
@@ -121,9 +138,19 @@ func TestWriteSSEEvent(t *testing.T) {
 	}
 }
 
+func TestWriteSSEEvent_LateMessageHasNoID(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeSSEEvent(w, message{id: 5, html: "<div>late</div>", late: true})
+
+	expected := "data: <div>late</div>\n\n"
+	if w.Body.String() != expected {
+		t.Fatalf("expected %q, got %q", expected, w.Body.String())
+	}
+}
+
 func TestWriteSSEEvent_Multiline(t *testing.T) {
 	w := httptest.NewRecorder()
-	writeSSEEvent(w, 1, "line1\nline2\nline3")
+	writeSSEEvent(w, message{id: 1, html: "line1\nline2\nline3"})
 
 	expected := "id: 1\ndata: line1\ndata: line2\ndata: line3\n\n"
 	if w.Body.String() != expected {
@@ -161,7 +188,7 @@ func TestMatchOrigin_Wildcard(t *testing.T) {
 func TestSSEHandler_MissingSignedStream(t *testing.T) {
 	req := httptest.NewRequest("GET", "/events", nil)
 	w := httptest.NewRecorder()
-	cfg := Config{SigningKey: testKey, AllowOrigins: []string{"*"}}
+	cfg := Config{SigningKeys: [][]byte{testKey}, AllowOrigins: []string{"*"}}
 	sseHandler(w, req, nil, req.Context(), cfg)
 
 	if w.Code != http.StatusBadRequest {
@@ -172,10 +199,83 @@ func TestSSEHandler_MissingSignedStream(t *testing.T) {
 func TestSSEHandler_InvalidSignedStream(t *testing.T) {
 	req := httptest.NewRequest("GET", "/events?signed_stream=bogus--token", nil)
 	w := httptest.NewRecorder()
-	cfg := Config{SigningKey: testKey, AllowOrigins: []string{"*"}}
+	cfg := Config{SigningKeys: [][]byte{testKey}, AllowOrigins: []string{"*"}}
 	sseHandler(w, req, nil, req.Context(), cfg)
 
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d", w.Code)
+	}
+}
+
+// openStream serves sseHandler over a real HTTP server and returns the
+// response for a valid /events request on channel "chat".
+func openStream(t *testing.T, cfg Config) *http.Response {
+	t.Helper()
+	cfg.SigningKeys = [][]byte{testKey}
+	cfg.AllowOrigins = []string{"*"}
+	cfg.TableName = "solid_cable_messages"
+	cfg.PollInterval = 5 * time.Millisecond
+
+	registry := newBroadcasterRegistry(setupTestDB(t), cfg)
+	t.Cleanup(registry.stopAll)
+	shutdown, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sseHandler(w, r, registry, shutdown, cfg)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(cancel) // runs first: end the stream so srv.Close does not block
+
+	resp, err := http.Get(srv.URL + "/events?signed_stream=" + signStream("chat", testKey))
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func TestSSEHandler_RetryIsFirstFrame(t *testing.T) {
+	resp := openStream(t, Config{RetryMS: 1500})
+	line, err := bufio.NewReader(resp.Body).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if line != "retry: 1500\n" {
+		t.Fatalf("first line = %q, want retry directive", line)
+	}
+	if v := resp.Header.Get("X-Finesse-Version"); v != version {
+		t.Fatalf("X-Finesse-Version = %q, want %q", v, version)
+	}
+}
+
+func TestSSEHandler_HeartbeatComment(t *testing.T) {
+	resp := openStream(t, Config{Heartbeat: 20 * time.Millisecond})
+	r := bufio.NewReader(resp.Body)
+	for i := 0; i < 2; i++ {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if line != ": ping\n" {
+			t.Fatalf("ping %d = %q, want a comment line", i, line)
+		}
+		if blank, _ := r.ReadString('\n'); blank != "\n" {
+			t.Fatalf("ping %d not terminated by a blank line: %q", i, blank)
+		}
+	}
+}
+
+func TestSSEHandler_NoHeartbeatWhenDisabled(t *testing.T) {
+	resp := openStream(t, Config{})
+	got := make(chan string, 1)
+	go func() {
+		b := make([]byte, 1)
+		n, _ := resp.Body.Read(b)
+		got <- string(b[:n])
+	}()
+	select {
+	case s := <-got:
+		t.Fatalf("unexpected bytes with heartbeat and retry off: %q", s)
+	case <-time.After(100 * time.Millisecond):
 	}
 }

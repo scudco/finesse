@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,37 +134,36 @@ func TestPostgres_OutOfOrderCommitDelivered(t *testing.T) {
 		t.Fatalf("insert B: %v", err)
 	}
 
-	got := recvHTML(t, ch, 1)
-	if got[0] != "<div>B</div>" {
-		t.Fatalf("expected B first, got %v", got)
+	got := recvMessages(t, ch, 1)
+	if got[0].html != "<div>B</div>" || got[0].late {
+		t.Fatalf("expected B first and on time, got %+v", got)
 	}
 
 	if err := txA.Commit(); err != nil {
 		t.Fatalf("commit A: %v", err)
 	}
-	got = recvHTML(t, ch, 1)
-	if got[0] != "<div>A</div>" {
-		t.Fatalf("expected late A, got %v", got)
+	got = recvMessages(t, ch, 1)
+	if got[0].html != "<div>A</div>" || !got[0].late {
+		t.Fatalf("expected A, marked late, got %+v", got)
 	}
 
-	// A reconnect from before both replays each exactly once, in id order.
+	// A reconnect from before both replays each exactly once, in id order, with
+	// ids (that client never saw a higher one).
 	ch2, catchup := f.registry.subscribe("chat", 0)
 	defer f.registry.unsubscribe("chat", ch2)
-	if len(catchup) != 2 || catchup[0].html != "<div>A</div>" || catchup[1].html != "<div>B</div>" {
+	if len(catchup) != 2 || catchup[0].html != "<div>A</div>" || catchup[1].html != "<div>B</div>" || catchup[0].late {
 		t.Fatalf("unexpected replay: %+v", catchup)
 	}
 }
 
-// recvHTML collects n messages from ch, failing if they do not arrive.
-func recvHTML(t *testing.T, ch chan []message, n int) []string {
+// recvMessages collects n messages from ch, failing if they do not arrive.
+func recvMessages(t *testing.T, ch chan []message, n int) []message {
 	t.Helper()
-	var out []string
+	var out []message
 	for len(out) < n {
 		select {
 		case msgs := <-ch:
-			for _, m := range msgs {
-				out = append(out, m.html)
-			}
+			out = append(out, msgs...)
 		case <-time.After(5 * time.Second):
 			t.Fatalf("got %d of %d messages: %v", len(out), n, out)
 		}
@@ -169,4 +172,82 @@ func recvHTML(t *testing.T, ch chan []message, n int) []string {
 		t.Fatalf("expected %d messages, got %v", n, out)
 	}
 	return out
+}
+
+// A late row goes out without an id: line, so the client's Last-Event-ID stays
+// at the highest id and a reconnect does not replay rows it already has.
+func TestPostgres_LateRowHasNoIDAndReconnectDoesNotReplay(t *testing.T) {
+	f := setupPostgres(t)
+	cfg := f.cfg
+	cfg.SigningKeys = [][]byte{testKey}
+	cfg.AllowOrigins = []string{"*"}
+	shutdown, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sseHandler(w, r, f.registry, shutdown, cfg)
+	}))
+	t.Cleanup(srv.Close)
+	t.Cleanup(cancel) // runs first: ends open streams so srv.Close does not block
+
+	open := func(lastID string) *bufio.Reader {
+		req, _ := http.NewRequest("GET", srv.URL+"/events?signed_stream="+signStream("chat", testKey), nil)
+		if lastID != "" {
+			req.Header.Set("Last-Event-ID", lastID)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		t.Cleanup(func() { resp.Body.Close() })
+		return bufio.NewReader(resp.Body)
+	}
+	// frame reads one event, up to the blank line.
+	frame := func(r *bufio.Reader) string {
+		var sb strings.Builder
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				t.Fatalf("read: %v (so far %q)", err, sb.String())
+			}
+			sb.WriteString(line)
+			if line == "\n" {
+				return sb.String()
+			}
+		}
+	}
+	insert := func(q interface {
+		Exec(string, ...any) (sql.Result, error)
+	}, html string) {
+		if _, err := q.Exec(f.insertSQL(), []byte("chat"), []byte(`"`+html+`"`)); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+
+	stream := open("")
+	time.Sleep(100 * time.Millisecond) // let the handler subscribe
+
+	txA, err := f.db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer txA.Rollback()
+	insert(txA, "<div>A</div>")  // id 1, held open
+	insert(f.db, "<div>B</div>") // id 2, commits first
+
+	if got := frame(stream); got != "id: 2\ndata: <div>B</div>\n\n" {
+		t.Fatalf("B frame = %q", got)
+	}
+	if err := txA.Commit(); err != nil {
+		t.Fatalf("commit A: %v", err)
+	}
+	if got := frame(stream); got != "data: <div>A</div>\n\n" {
+		t.Fatalf("late A frame = %q, want no id line", got)
+	}
+
+	// The client's last id is 2. Reconnecting from it replays nothing.
+	reconnected := open("2")
+	time.Sleep(100 * time.Millisecond)
+	insert(f.db, "<div>C</div>")
+	if got := frame(reconnected); got != "id: 3\ndata: <div>C</div>\n\n" {
+		t.Fatalf("first frame after reconnect = %q, want only C", got)
+	}
 }

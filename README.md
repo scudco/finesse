@@ -94,17 +94,20 @@ Finesse picks the backend from the cable database's `adapter` in `config/databas
    bundle install
    ```
 
-3. Add to your `config/puma.rb`:
+3. Run the generator:
+   ```sh
+   bin/rails g finesse:install
+   ```
+   It adds this line to `config/puma.rb` (once, so re-running is safe) and creates `config/initializers/finesse.rb`:
    ```ruby
    plugin :finesse
    ```
 
 4. Point your Turbo streams at Finesse. Where a view has `turbo_stream_from @chat`, render this instead:
    ```erb
-   <%= tag.turbo_stream_source src: "http://localhost:4000/events?" +
-         { signed_stream: Turbo::StreamsChannel.signed_stream_name(@chat) }.to_query %>
+   <%= finesse_stream_from @chat %>
    ```
-   Turbo's `<turbo-stream-source>` opens an `EventSource` for any `http(s)` URL, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. In production, use your public Finesse URL.
+   It takes the same arguments as `turbo_stream_from`, so broadcasts (`broadcast_append_to @chat`, etc.) need no changes. It points the stream at `http://localhost:4000` by default. In production, set `config.finesse.url` or the `FINESSE_URL` env var to your public Finesse URL.
 
 5. Start your app:
    ```sh
@@ -143,7 +146,7 @@ On PostgreSQL (`--db-url`), Finesse installs an `AFTER INSERT` trigger at boot t
 
 Reconnecting clients send `Last-Event-ID` and get every message they missed. Recent ones come from a 200-message memory buffer per channel. Anything older, including after the last client left, after a restart, or after a long disconnect, is read back from the table (the newest 1000 rows, within SolidCable's `message_retention`).
 
-On PostgreSQL, ids come from a sequence at insert but rows appear at commit, so a row can commit after a higher id was already delivered. Finesse notes ids below the newest one that are missing from the whole table and re-queries them for 10 seconds. A late row arrives as soon as it commits. Ids that never show up are rolled-back inserts and expire. A transaction held open longer than that can still be missed. SQLite has one writer and needs none of this.
+On PostgreSQL, ids come from a sequence at insert but rows appear at commit, so a row can commit after a higher id was already delivered. Finesse notes ids below the newest one that are missing from the whole table and re-queries them for 10 seconds. A late row arrives as soon as it commits, sent without an `id:` line so the client's `Last-Event-ID` stays at the highest id and a reconnect does not replay it. Ids that never show up are rolled-back inserts and expire. A transaction held open longer than that can still be missed. SQLite has one writer and needs none of this.
 
 Key design choices:
 - **Polling with NOTIFY wakeup** — SQLite polls every 10ms; PostgreSQL rides `LISTEN/NOTIFY` with a 1s polling safety net
@@ -160,24 +163,29 @@ Key design choices:
 | `--table-name` | `solid_cable_messages` | SolidCable messages table name |
 | `--poll-interval` | `10` SQLite / `1000` PostgreSQL | Database poll interval (integer, milliseconds) |
 | `--allow-origin` | *(required)* | `Access-Control-Allow-Origin` header value |
+| `--heartbeat` | `20s` | Interval between `: ping` keepalive comments. `0` disables them |
+| `--retry` | `2000` | Reconnect delay (milliseconds) sent to `EventSource` as `retry:` when a stream starts. `0` omits it |
+| `--drain-timeout` | `25s` | On SIGTERM/SIGINT, how long open streams stay alive before they close. Browsers then reconnect and resume with `Last-Event-ID`. A second signal exits immediately |
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `FINESSE_SIGNING_KEY` | Hex-encoded HMAC key for signed stream verification. The Puma plugin and `bundle exec finesse` derive it from Rails when unset |
+| `FINESSE_SIGNING_KEYS` | Comma-separated hex keys, all accepted for verification alongside `FINESSE_SIGNING_KEY`. Use it to rotate keys: add the new key, deploy, then retire the old one |
 | `BINDING` | Bind address (default: `127.0.0.1`) |
 | `FINESSE_ALLOW_ORIGIN` | Puma plugin only: comma-separated allowed origins. Defaults to `http://localhost:3000` when `RAILS_ENV`/`RACK_ENV` is development or unset; required otherwise |
+| `FINESSE_URL` | Default for `config.finesse.url`, the public URL `finesse_stream_from` points browsers at (default `http://localhost:$FINESSE_PORT`) |
 | `FINESSE_PORT` | Puma plugin only: listen port passed as `--port` (default `4000`) |
 
 ## Endpoints
 
 | Path | Description |
 |------|-------------|
-| `GET /up` | Health check (returns 200) |
+| `GET /up` | Health check. Returns 200 with the Finesse version as the body |
 | `GET /events?signed_stream=<token>` | SSE stream for the given signed stream |
 
-The SSE endpoint supports the `Last-Event-ID` header and replays missed messages on reconnect. Stream tokens use the same `ActiveSupport::MessageVerifier` format as Turbo's signed streams.
+The SSE endpoint supports the `Last-Event-ID` header and replays missed messages on reconnect. Stream tokens use the same `ActiveSupport::MessageVerifier` format as Turbo's signed streams. Both endpoints set an `X-Finesse-Version` header.
 
 ## Development
 
@@ -272,9 +280,22 @@ location /finesse/ {
   # SSE requires unbuffered responses
   proxy_buffering off;
   proxy_cache off;
-  proxy_read_timeout 86400s;
+  # Finesse pings every 20s, so a short timeout is safe and frees dead connections
+  proxy_read_timeout 75s;
 }
 ```
+
+Browsers allow only 6 HTTP/1.1 connections per origin, and each open tab holds one for its stream. Serve the SSE hostname over HTTP/2 at the proxy so tabs share one connection ([MDN: EventSource](https://developer.mozilla.org/en-US/docs/Web/API/EventSource)). In nginx that means `listen 443 ssl; http2 on;` on the server block. kamal-proxy enables HTTP/2 automatically when it terminates TLS.
+
+### systemd
+
+To run Finesse as its own service, generate a unit file:
+
+```sh
+bin/rails g finesse:systemd --origin https://yourapp.com --user deploy
+```
+
+This writes `config/finesse.service`, which runs `bundle exec finesse --allow-origin <origin>` from your app root and restarts it on failure. Copy it to `/etc/systemd/system/` and run `systemctl enable --now finesse`. Set `FINESSE_SIGNING_KEY` in the unit to skip the `rails runner` boot.
 
 ### Kamal
 

@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require 'bundler/gem_tasks'
+require_relative 'lib/finesse/version'
 
 PLATFORMS = {
   'arm64-darwin' => { goos: 'darwin', goarch: 'arm64' },
@@ -49,7 +50,7 @@ def go_build(platform)
   puts "Building #{platform} -> exe/#{platform}/finesse"
   Dir.chdir(GO_SRC) do
     ENV.update('CGO_ENABLED' => '0', 'GOOS' => target[:goos], 'GOARCH' => target[:goarch])
-    sh "go build -trimpath -ldflags='-s -w' -o #{out} ."
+    sh "go build -trimpath -ldflags='-s -w -X main.version=#{Finesse::VERSION}' -o #{out} ."
   end
 end
 
