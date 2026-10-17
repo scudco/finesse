@@ -26,11 +26,45 @@ class TestExe < Minitest::Test
     refute_includes output, 'should_not_use'
   end
 
+  def test_exe_injects_db_url_for_postgres
+    output = run_shim_with_yaml(<<~YAML)
+      development:
+        cable:
+          adapter: postgresql
+          database: app_cable
+          host: localhost
+          username: app
+    YAML
+
+    assert_includes output, '--db-url dbname=app_cable host=localhost user=app'
+    refute_includes output, '--db-path'
+  end
+
+  def test_exe_does_not_override_explicit_db_url
+    output = run_shim_with_yaml(<<~YAML, '--db-url', 'dbname=custom')
+      development:
+        cable:
+          adapter: postgresql
+          database: should_not_use
+    YAML
+
+    assert_includes output, '--db-url dbname=custom'
+    refute_includes output, 'should_not_use'
+  end
+
   private
 
   def run_shim_with_db(db_path, *extra_args)
+    run_shim_with_yaml(<<~YAML, *extra_args)
+      development:
+        cable:
+          database: #{db_path}
+    YAML
+  end
+
+  def run_shim_with_yaml(yaml, *extra_args)
     Dir.mktmpdir do |dir|
-      setup_test_dir(dir, db_path)
+      setup_test_dir(dir, yaml)
       output, status = Open3.capture2(
         { 'FINESSE_SIGNING_KEY' => 'abc123' },
         'ruby', File.join(dir, 'finesse'), *extra_args, chdir: dir
@@ -41,20 +75,11 @@ class TestExe < Minitest::Test
     end
   end
 
-  def setup_test_dir(dir, db_path)
-    write_database_yml(dir, db_path)
-    fake_bin = write_fake_binary(dir)
-    write_shim(dir, fake_bin)
-  end
-
-  def write_database_yml(dir, db_path)
+  def setup_test_dir(dir, yaml)
     config_dir = File.join(dir, 'config')
     FileUtils.mkdir_p(config_dir)
-    File.write(File.join(config_dir, 'database.yml'), <<~YAML)
-      development:
-        cable:
-          database: #{db_path}
-    YAML
+    File.write(File.join(config_dir, 'database.yml'), yaml)
+    write_shim(dir, write_fake_binary(dir))
   end
 
   def write_fake_binary(dir)
@@ -76,12 +101,7 @@ class TestExe < Minitest::Test
       $LOAD_PATH.unshift("#{lib_path}")
       require "finesse/platforms"
       Finesse::Platforms.define_singleton_method(:executable) { "#{fake_bin}" }
-      args = ARGV.dup
-      unless args.any? { |a| a.start_with?("--db-path") }
-        db_path = Finesse::Platforms.cable_db_path
-        args.unshift("--db-path", db_path) if db_path
-      end
-      exec(Finesse::Platforms.executable, *args)
+      load "#{EXE_PATH}"
     RUBY
   end
 end
