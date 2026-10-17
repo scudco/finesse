@@ -151,7 +151,7 @@ The SSE endpoint supports the `Last-Event-ID` header for automatic reconnection 
 
 ### Compiling from source
 
-Requires Go 1.24+.
+Requires Go 1.26+.
 
 ```sh
 bundle exec rake build:local   # Build for current platform
