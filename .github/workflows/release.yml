@@ -17,6 +17,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
+          cache-dependency-path: ext/finesse/go.sum
           go-version-file: ext/finesse/go.mod
 
       - uses: ruby/setup-ruby@v1
