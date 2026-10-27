@@ -13,9 +13,9 @@ jobs:
       id-token: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: ext/finesse/go.mod
 
@@ -43,7 +43,9 @@ jobs:
         run: gem build finesse.gemspec
 
       - name: Configure RubyGems trusted publisher
-        uses: rubygems/configure-rubygems-credentials@main
+        # Pinned to a commit: this job can publish the gem. f5a32ef is the
+        # commit `@main` resolved to for the v0.1.0.beta4 release.
+        uses: rubygems/configure-rubygems-credentials@f5a32efa94076b80b28556b2d3b04cb3707b6df1
 
       - name: Push to RubyGems
         run: gem push finesse-*.gem
