@@ -35,15 +35,20 @@ ext/finesse/broadcaster.go     Per-channel polling + notify wakeup, ring buffer 
 ## Commands
 
 ```sh
-bundle exec rake test          # Run Go + Ruby tests
+bundle exec rake ci            # Gate: test:go (-race) + test:ruby + RuboCop — exactly what CI runs (~10s)
+bundle exec rake test          # Go + Ruby tests, no RuboCop
 bundle exec rake test:go       # Go tests only
 bundle exec rake test:ruby     # Ruby tests only
 bundle exec rake build:local   # Compile Go binary for current platform
-bundle exec rake build:all     # Cross-compile for all 4 platforms
-bundle exec rake release_build # Tests + build all + gem package
 ```
 
 Always use `bundle exec` — Ruby tests spawn subprocesses that need the gem's lib/ on the load path.
+
+`bundle exec rake ci` is the gate: a change is done when it passes. The Ruby tests print `warning: method redefined; discarding old signed_stream_verifier_key` (two tests stub Turbo); it is harmless.
+
+The `TestPostgres_*` end-to-end tests skip unless `FINESSE_TEST_PG_URL` points at a PostgreSQL 14+; it is unset locally and in CI. Changes to the Postgres path (`store.go`, `broadcaster.go`) are therefore not fully verified by the gate — say so in the PR.
+
+Release tasks are maintainer-only; agents never run them: `rake release_gem[VERSION]` (bumps version, commits, tags, pushes, creates a GitHub release), `rake release` (Bundler: tags and pushes the gem to rubygems.org), and `rake build` / `rake build:all` (cross-compile and package release artifacts).
 
 ## Test Structure
 
